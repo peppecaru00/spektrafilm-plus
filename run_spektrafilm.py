@@ -10,16 +10,48 @@ if getattr(sys, "frozen", False):
     bundle_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     if bundle_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = bundle_dir + os.pathsep + os.environ.get("PATH", "")
-    # Add DLL subdirectories if present
-    for sub in ["nvidia", os.path.join("OpenImageIO", "bin"), "exiv2", "rawpy", "lensfunpy", "shiboken6", "PySide6"]:
-        sub_path = os.path.join(bundle_dir, sub)
-        if os.path.isdir(sub_path):
-            os.environ["PATH"] = sub_path + os.pathsep + os.environ.get("PATH", "")
+    if hasattr(os, "add_dll_directory") and os.path.isdir(bundle_dir):
+        try:
+            os.add_dll_directory(bundle_dir)
+        except Exception:
+            pass
+
+    # Recursively discover and register all directories containing DLL files
+    dll_dirs: set[str] = set()
+    for root, dirs, files in os.walk(bundle_dir):
+        if any(f.lower().endswith(".dll") for f in files):
+            dll_dirs.add(root)
+
+    for d in sorted(dll_dirs):
+        if d not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(d)
+            except Exception:
+                pass
+
+    # Point CUDA_PATH to bundled nvidia runtime directory if present
+    cuda_runtime_dir = os.path.join(bundle_dir, "nvidia", "cuda_runtime")
+    if os.path.isdir(cuda_runtime_dir):
+        os.environ.setdefault("CUDA_PATH", cuda_runtime_dir)
 else:
     repo_root = Path(__file__).resolve().parent
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
+
+    # In development mode on Windows, register any site-packages nvidia DLL directories
+    if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+        for sp in list(sys.path):
+            nvidia_cand = os.path.join(sp, "nvidia")
+            if os.path.isdir(nvidia_cand):
+                for root, dirs, files in os.walk(nvidia_cand):
+                    if any(f.lower().endswith(".dll") for f in files):
+                        try:
+                            os.add_dll_directory(root)
+                        except Exception:
+                            pass
 
 
 def _launch() -> None:

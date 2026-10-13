@@ -14,13 +14,19 @@ warnings.filterwarnings("ignore", message=".*CUDA path could not be detected.*",
 logger = logging.getLogger(__name__)
 
 _CUPY_AVAILABLE: bool | None = None
+_CUDA_INIT_ERROR: str | None = None
 _CUDA_DEVICE_INFO: dict[str, Any] | None = None
 _MANAGED_POOL: Any = None
 
 
+def get_cuda_init_error() -> str | None:
+    """Return error message from CUDA initialization probe if it failed."""
+    return _CUDA_INIT_ERROR
+
+
 def is_cuda_available() -> bool:
     """Return True if CuPy and a functional CUDA GPU are available."""
-    global _CUPY_AVAILABLE, _MANAGED_POOL
+    global _CUPY_AVAILABLE, _MANAGED_POOL, _CUDA_INIT_ERROR
     if _CUPY_AVAILABLE is not None:
         return _CUPY_AVAILABLE
 
@@ -33,6 +39,7 @@ def is_cuda_available() -> bool:
             test_arr = cp.zeros(1, dtype=cp.float32)
             _ = float(test_arr.sum().get())
             _CUPY_AVAILABLE = True
+            _CUDA_INIT_ERROR = None
 
             # Configure CuPy allocator.
             # IMPORTANT: Do NOT use cudaMallocManaged on Windows!
@@ -49,9 +56,11 @@ def is_cuda_available() -> bool:
                 except Exception as exc:
                     logger.debug("Managed memory allocator initialization failed: %s", exc)
         else:
+            _CUDA_INIT_ERROR = "No CUDA-capable GPU found (getDeviceCount returned 0)"
             _CUPY_AVAILABLE = False
     except Exception as exc:
-        logger.debug("CUDA acceleration not available: %s", exc)
+        _CUDA_INIT_ERROR = f"{type(exc).__name__}: {exc}"
+        logger.warning("CUDA acceleration not available: %s", exc)
         _CUPY_AVAILABLE = False
 
     return _CUPY_AVAILABLE
@@ -66,9 +75,10 @@ def get_device_info() -> dict[str, Any]:
     if not is_cuda_available():
         _CUDA_DEVICE_INFO = {
             "available": False,
-            "device_name": "CPU",
+            "device_name": "CPU (multi-core)",
             "total_memory_gb": 0.0,
             "compute_capability": (0, 0),
+            "error": _CUDA_INIT_ERROR,
         }
         return _CUDA_DEVICE_INFO
 
@@ -84,8 +94,10 @@ def get_device_info() -> dict[str, Any]:
         "device_name": name,
         "total_memory_gb": round(total_mem, 2),
         "compute_capability": (major, minor),
+        "error": None,
     }
     return _CUDA_DEVICE_INFO
+
 
 
 def resolve_device(device_setting: str = "auto") -> str:

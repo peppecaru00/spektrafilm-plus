@@ -882,9 +882,24 @@ class DisplaySection(QWidget):
             dev_name = info.get("device_name", "CUDA GPU")
             mem_gb = info.get("total_memory_gb", 0.0)
             self._hw_status_text = f"{dev_name} ({mem_gb:.1f} GB)"
+            self.hardware_label = QLabel(self._hw_status_text)
+            self.hardware_label.setStyleSheet("color: #4ade80; font-weight: 500;")
+            self.hardware_label.setToolTip(
+                f"NVIDIA CUDA acceleration ACTIVE\nDevice: {dev_name}\nVRAM: {mem_gb:.1f} GB\n\n"
+                "Note: In Windows Task Manager, CUDA compute usage appears under the 'Compute_0' or 'CUDA' engine graph, "
+                "not the default '3D' graph."
+            )
         else:
+            info = get_device_info()
+            err = info.get("error")
             self._hw_status_text = "CPU (multi-core)"
-        self.hardware_label = QLabel(self._hw_status_text)
+            self.hardware_label = QLabel(self._hw_status_text)
+            self.hardware_label.setStyleSheet("color: #facc15; font-weight: 500;")
+            tooltip = "GPU acceleration not available (using multi-core CPU)"
+            if err:
+                tooltip += f"\nReason: {err}"
+            self.hardware_label.setToolTip(tooltip)
+
 
         for spec in DISPLAY_PANEL_FIELDS:
             editor = _editor_from_param_spec(_path_annotation(DisplayState, spec.path), spec, label=spec.path)

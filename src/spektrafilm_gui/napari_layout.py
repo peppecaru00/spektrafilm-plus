@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 QFrame = QtWidgets.QFrame
 QIcon = QtGui.QIcon
+QLabel = QtWidgets.QLabel
 QMainWindow = QtWidgets.QMainWindow
 QPushButton = QtWidgets.QPushButton
 QStatusBar = QtWidgets.QStatusBar
@@ -510,6 +511,47 @@ def _build_viewer_panel(
     home_button.setFixedHeight(row_height)
     status_bar.setFixedHeight(row_height)
     status_container.setFixedHeight(row_height)
+    gpu_badge = QLabel()
+    gpu_badge.setObjectName('gpuBadge')
+    gpu_badge.setFixedHeight(row_height)
+    gpu_badge.setAlignment(Qt.AlignCenter)
+    try:
+        from spektrafilm.cuda.device import is_cuda_available, get_device_info
+        if is_cuda_available():
+            dev_info = get_device_info()
+            dev_name = dev_info.get("device_name", "CUDA GPU")
+            mem_gb = dev_info.get("total_memory_gb", 0.0)
+            gpu_badge.setText(f"⚡ GPU: {dev_name}")
+            gpu_badge.setStyleSheet(
+                "color: #4ade80; font-size: 11px; font-weight: 600; padding: 0 8px; "
+                "background-color: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.3); "
+                "border-radius: 4px;"
+            )
+            gpu_badge.setToolTip(
+                f"NVIDIA CUDA acceleration ACTIVE\n"
+                f"Device: {dev_name}\n"
+                f"VRAM: {mem_gb:.1f} GB\n\n"
+                f"Note: In Windows Task Manager, CUDA compute activity appears under the 'Compute_0' or 'CUDA' engine graph, "
+                f"not the default '3D' graph."
+            )
+        else:
+            dev_info = get_device_info()
+            err = dev_info.get("error")
+            gpu_badge.setText("⚙ CPU")
+            gpu_badge.setStyleSheet(
+                "color: #facc15; font-size: 11px; font-weight: 500; padding: 0 8px; "
+                "background-color: rgba(250, 204, 21, 0.12); border: 1px solid rgba(250, 204, 21, 0.3); "
+                "border-radius: 4px;"
+            )
+            tooltip = "GPU acceleration not available (using multi-core CPU)"
+            if err:
+                tooltip += f"\nReason: {err}"
+            gpu_badge.setToolTip(tooltip)
+    except Exception:
+        gpu_badge.setText("⚙ CPU")
+        gpu_badge.setStyleSheet("color: #facc15; font-size: 11px; padding: 0 8px;")
+
+    status_layout.addWidget(gpu_badge)
     status_layout.addWidget(undo_button)
     status_layout.addWidget(redo_button)
     status_layout.addWidget(rotate_ccw_button)
@@ -533,6 +575,7 @@ def _build_viewer_panel(
     panel.viewer_widget = viewer_widget
     panel.undo_button = undo_button
     panel.redo_button = redo_button
+    panel.gpu_badge = gpu_badge
     return panel
 
 
