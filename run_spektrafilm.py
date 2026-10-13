@@ -45,6 +45,10 @@ if __name__ == "__main__":
                 f.write(err_msg)
         except Exception:
             pass
-        sys.stderr.write(err_msg)
+        if sys.stderr is not None:
+            try:
+                sys.stderr.write(err_msg)
+            except Exception:
+                pass
         sys.exit(1)
 
