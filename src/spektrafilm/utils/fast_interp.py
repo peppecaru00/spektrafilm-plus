@@ -3,7 +3,7 @@ import numba
 import time
 
 @numba.njit(parallel=True, fastmath=True, cache=True)
-def fast_interp(image, x_axis, y_vals):
+def _numba_fast_interp(image, x_axis, y_vals):
     """
     Perform 1-D linear interpolation on an N-dimensional array where the
     last dimension is 3. The x_axis can be:
@@ -81,6 +81,15 @@ def fast_interp(image, x_axis, y_vals):
                 flat_result[i, c] = y_vals[low, c] + t * (y_vals[low + 1, c] - y_vals[low, c])
                 
     return flat_result.reshape(shape)
+ 
+
+def fast_interp(image, x_axis, y_vals):
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(image):
+        from spektrafilm.cuda.interp import cuda_fast_interp
+        return cuda_fast_interp(image, x_axis, y_vals)
+    return _numba_fast_interp(image, x_axis, y_vals)
+
 
 def np_interp_for_image(image, x_axis, y_vals):
     """

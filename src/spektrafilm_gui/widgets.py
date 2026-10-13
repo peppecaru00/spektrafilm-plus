@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 from spektrafilm_gui.param_manifest import (
     CAMERA_DIFFUSION_MANIFEST,
@@ -17,6 +18,7 @@ from spektrafilm_gui.param_manifest import (
 from spektrafilm_gui.widget_primitives import CollapsibleSection, platform_default_font
 from spektrafilm_gui.widget_sections import (
     ParamsGroupSection,
+    ChemistrySection,
     DisplaySection,
     EnlargerSection,
     ExposureControlSection,
@@ -30,6 +32,7 @@ from spektrafilm_gui.widget_sections import (
     SpecialSection,
     SpectralUpsamplingSection,
     TuneSection,
+    ComputePrecisionSection,
 )
 
 
@@ -54,7 +57,7 @@ class WidgetBundle:
     camera_diffusion: ParamsGroupSection
     halation: ParamsGroupSection
     couplers: ParamsGroupSection
-    chemistry: ParamsGroupSection
+    chemistry: ChemistrySection
     glare: ParamsGroupSection
     input_gamut_compress: ParamsGroupSection
     output_gamut_compress: ParamsGroupSection
@@ -67,10 +70,16 @@ class WidgetBundle:
     scanner: ParamsGroupSection
     spectral_upsampling: SpectralUpsamplingSection
     tune: TuneSection
+    compute_precision: ComputePrecisionSection
     output: OutputSection
+    gallery: Any = None
+    gallery_model: Any = None
 
 
 def create_widget_bundle() -> WidgetBundle:
+    from spektrafilm_gui.gallery_model import GalleryModel
+    from spektrafilm_gui.gallery_filmstrip import GalleryFilmstripWidget
+
     filepicker = FilePickerSection()
     input_image = InputImageSection(filepicker)
     simulation = SimulationSection()
@@ -79,6 +88,9 @@ def create_widget_bundle() -> WidgetBundle:
     scanner = ParamsGroupSection(SCANNER_MANIFEST)
     camera = ParamsGroupSection(CAMERA_MANIFEST)
     simulation.bind_scan_for_print_sections(glare=glare, scanner=scanner)
+
+    gallery_model = GalleryModel()
+    gallery = GalleryFilmstripWidget(gallery_model)
 
     return WidgetBundle(
         filepicker=filepicker,
@@ -92,7 +104,7 @@ def create_widget_bundle() -> WidgetBundle:
         camera_diffusion=ParamsGroupSection(CAMERA_DIFFUSION_MANIFEST),
         halation=ParamsGroupSection(HALATION_MANIFEST),
         couplers=ParamsGroupSection(DIR_COUPLERS_MANIFEST),
-        chemistry=ParamsGroupSection(CHEMISTRY_MANIFEST),
+        chemistry=ChemistrySection(CHEMISTRY_MANIFEST),
         glare=glare,
         input_gamut_compress=ParamsGroupSection(INPUT_GAMUT_COMPRESS_MANIFEST),
         output_gamut_compress=ParamsGroupSection(OUTPUT_GAMUT_COMPRESS_MANIFEST),
@@ -105,5 +117,8 @@ def create_widget_bundle() -> WidgetBundle:
         scanner=scanner,
         spectral_upsampling=SpectralUpsamplingSection(input_image),
         tune=TuneSection(special),
+        compute_precision=ComputePrecisionSection(input_image),
         output=OutputSection(simulation),
+        gallery=gallery,
+        gallery_model=gallery_model,
     )

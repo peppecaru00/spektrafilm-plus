@@ -13,6 +13,7 @@ QHBoxLayout = QtWidgets.QHBoxLayout
 QLabel = QtWidgets.QLabel
 QLineEdit = QtWidgets.QLineEdit
 QPushButton = QtWidgets.QPushButton
+QMenu = QtWidgets.QMenu
 QSizePolicy = QtWidgets.QSizePolicy
 QVBoxLayout = QtWidgets.QVBoxLayout
 QWidget = QtWidgets.QWidget
@@ -27,6 +28,7 @@ from spektrafilm_gui.param_manifest import (
     INPUT_IMAGE_FIELDS,
     INPUT_PANEL_FIELDS,
     ParamSpec,
+    PRECISION_PANEL_FIELDS,
     SIMULATION_ENLARGER_PANEL_FIELDS,
     SIMULATION_EXPOSURE_PANEL_FIELDS,
     SIMULATION_FIELDS,
@@ -47,9 +49,18 @@ from spektrafilm_gui.state import (
     SpecialState,
     clone_state_section,
 )
+from spektrafilm.utils.raw_file_processor import read_raw_white_balance
+from spektrafilm_gui.curve_editor import YRGBCurveEditor
 from spektrafilm_gui.persistence import load_dialog_dir, save_dialog_dir
-from spektrafilm_gui.theme_palette import SIZE_FOOTER_ITEM_SPACING
-from spektrafilm_gui.options import RawWhiteBalance
+from spektrafilm_gui.theme_palette import (
+    ACCENT_COLOR_TEXT,
+    GRAY_1,
+    GRAY_3,
+    SIZE_FOOTER_ITEM_SPACING,
+    SIZE_SECTION_STACK_SPACING,
+    TEXT_MAIN,
+)
+from spektrafilm_gui.options import RawHighlightMode, RawWhiteBalance
 from spektrafilm_gui.widget_editors import BoolEditor, EnumEditor, FloatEditor, FloatTupleEditor, IntEditor, IntTupleEditor, ProfileEnumEditor
 from spektrafilm_gui.widget_primitives import CollapsibleSection, normalize_ui_text as _normalize_ui_text
 
@@ -75,7 +86,42 @@ LOAD_RAW_FIELDS = (
         min=0,
         step=0.01,
     ),
+    ParamSpec(
+        'raw_exposure_ev',
+        label='Raw exposure',
+        tooltip='Pre-demosaic raw exposure shift in EV stops (-4.0 to +4.0). Darkening pulls unclipped sensor highlights into recoverable range',
+        min=-4.0,
+        max=4.0,
+        step=0.1,
+    ),
+    ParamSpec(
+        'highlight_recovery',
+        label='Highlight recovery',
+        tooltip='Highlight preservation and recovery strength (0.0 = linear, 1.0 = maximum preservation and roll-off)',
+        min=0.0,
+        max=1.0,
+        step=0.05,
+    ),
+    ParamSpec(
+        'highlight_mode',
+        label='Highlight mode',
+        tooltip='Algorithm to reconstruct clipped highlights from unclipped channels (reconstruct, blend, clip, ignore)',
+        enum=RawHighlightMode,
+    ),
     ParamSpec('lens_correction', label='Lens correction', tooltip='Apply lens corrections'),
+    ParamSpec(
+        'chroma_denoise',
+        label='Chroma denoise',
+        tooltip='Apply edge-preserving guided chrominance denoising to reduce sensor color noise',
+    ),
+    ParamSpec(
+        'chroma_denoise_strength',
+        label='Denoise strength',
+        tooltip='Strength of chrominance denoising (0.0 = off, 1.0 = standard, up to 2.0 = strong)',
+        min=0.0,
+        max=2.0,
+        step=0.1,
+    ),
 )
 
 _LOAD_RAW_FIELD_SPECS = {spec.leaf: spec for spec in LOAD_RAW_FIELDS}
@@ -369,11 +415,24 @@ class LoadRawSection(QWidget):
     def __init__(self):
         super().__init__()
         self._source: LoadRawState | None = None
+        self._detected_wb: tuple[float, float] | None = None
         self.file_path = QLineEdit()
         self.file_path.setReadOnly(True)
         self.file_path.setPlaceholderText(_normalize_ui_text('No raw selected'))
-        self.reprocess_button = _build_button('reprocess raw', self._reprocess_raw, role='compactAction')
+        self.reprocess_button = _build_button(
+            'reprocess raw',
+            self._reprocess_raw,
+            tooltip='Reprocess the RAW image applying the modified import settings (exposure, highlight recovery, white balance, etc.)',
+            role='compactAction',
+        )
         self.reprocess_button.setEnabled(False)
+        self.convert_dng_button = _build_button(
+            'Convert to DNG',
+            self._convert_to_dng,
+            tooltip='Convert the selected RAW file into a standard DNG-RAW using Adobe DNG Converter',
+            role='compactAction',
+        )
+        self.convert_dng_button.setEnabled(False)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -381,6 +440,8 @@ class LoadRawSection(QWidget):
             spec = _LOAD_RAW_FIELD_SPECS[field_name]
             editor = _editor_from_param_spec(self._TYPE_HINTS[field_name], spec, label=f'{self.SECTION_NAME}.{field_name}')
             setattr(self, field_name, editor)
+
+        self.white_balance.currentTextChanged.connect(self._on_white_balance_mode_changed)
 
         form = _new_form_layout()
         browse_button = _build_button(
@@ -392,9 +453,29 @@ class LoadRawSection(QWidget):
         form.addRow(_build_vertical_container(_build_button_row(self.file_path, browse_button, spacing=4), spacing=0))
         for field_name in self._STATE_FIELD_NAMES:
             form.addRow(_build_widget_label(self.SECTION_NAME, field_name), getattr(self, field_name))
-        form.addRow(self.reprocess_button)
+        form.addRow(_build_button_row(self.reprocess_button, self.convert_dng_button, spacing=4))
 
         self.setLayout(_build_collapsible_form_section(self.TITLE, form, expanded=False))
+
+    def _on_white_balance_mode_changed(self, mode: str) -> None:
+        if mode == 'as_shot':
+            if self._detected_wb is not None:
+                self.temperature.value = self._detected_wb[0]
+                self.tint.value = self._detected_wb[1]
+            elif self.file_path.text().strip() and Path(self.file_path.text().strip()).is_file():
+                try:
+                    wb = read_raw_white_balance(self.file_path.text().strip())
+                    self._detected_wb = wb
+                    self.temperature.value = wb[0]
+                    self.tint.value = wb[1]
+                except Exception:
+                    pass
+        elif mode == 'daylight':
+            self.temperature.value = 5500.0
+            self.tint.value = 1.0
+        elif mode == 'tungsten':
+            self.temperature.value = 3200.0
+            self.tint.value = 1.0
 
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, _normalize_ui_text('Select input raw'), load_dialog_dir('raw_input'))
@@ -414,6 +495,18 @@ class LoadRawSection(QWidget):
         self._source = state
         for field_name in self._STATE_FIELD_NAMES:
             getattr(self, field_name).value = getattr(state, field_name)
+        if state.white_balance == 'as_shot':
+            if self._detected_wb is not None:
+                self.temperature.value = self._detected_wb[0]
+                self.tint.value = self._detected_wb[1]
+            elif self.file_path.text().strip() and Path(self.file_path.text().strip()).is_file():
+                try:
+                    wb = read_raw_white_balance(self.file_path.text().strip())
+                    self._detected_wb = wb
+                    self.temperature.value = wb[0]
+                    self.tint.value = wb[1]
+                except Exception:
+                    pass
 
     def get_state(self) -> LoadRawState:
         state = clone_state_section(self._source) if self._source is not None else clone_state_section(PROJECT_DEFAULT_GUI_STATE.gui_only.load_raw)
@@ -422,8 +515,38 @@ class LoadRawSection(QWidget):
         return state
 
     def set_path(self, path: str) -> None:
+        path_changed = self.file_path.text() != path
         self.file_path.setText(path)
         self.reprocess_button.setEnabled(bool(path.strip()))
+        ext = Path(path).suffix.lower() if path.strip() else ""
+        from spektrafilm_gui.gallery_thumbnails import RAW_EXTENSIONS
+        self.convert_dng_button.setEnabled(bool(path.strip()) and ext in RAW_EXTENSIONS and ext != '.dng')
+        if path_changed or self._detected_wb is None:
+            if path.strip() and Path(path).is_file():
+                try:
+                    temp, tint = read_raw_white_balance(path)
+                    self._detected_wb = (temp, tint)
+                    if self.white_balance.value == 'as_shot':
+                        self.temperature.value = temp
+                        self.tint.value = tint
+                except Exception:
+                    pass
+            else:
+                self._detected_wb = None
+
+    def _convert_to_dng(self) -> None:
+        path = self.file_path.text().strip()
+        if not path or not Path(path).is_file():
+            return
+        from spektrafilm.utils.raw_file_processor import convert_raw_to_dng
+        try:
+            dng_path = convert_raw_to_dng(path)
+            self.set_path(str(dng_path))
+            self.load_requested.emit(str(dng_path))
+        except Exception as exc:
+            from qtpy.QtWidgets import QMessageBox
+            from spektrafilm_gui.napari_layout import dialog_parent
+            QMessageBox.critical(dialog_parent(self), 'Convert to DNG', f'Failed to convert RAW to DNG:\n\n{exc}')
 
 
 class PreviewCropSection(QWidget):
@@ -502,6 +625,110 @@ class ParamsGroupSection(QWidget):
         return replace(base, **overrides)
 
 
+class ChemistrySection(ParamsGroupSection):
+    """Chemistry section combining an interactive YRGB curve editor with the fine-tuning parameter sliders."""
+
+    def __init__(self, manifest: GroupManifest):
+        self._syncing_curve = False
+        self.curve_editor: YRGBCurveEditor = YRGBCurveEditor()
+        super().__init__(manifest)
+        self.set_state(self._group_cls())
+
+    def _build_ui(self) -> None:
+        for spec in self._manifest.fields:
+            editor = self._build_editor(spec)
+            self._editors[spec.leaf] = editor
+            setattr(self, spec.leaf, editor)
+
+        # Wire chemistry sliders to update the curve editor live
+        for leaf, ed in self._editors.items():
+            if leaf == 'active':
+                continue
+            sig = getattr(ed, 'valueChanged', None)
+            if sig is not None and hasattr(sig, 'connect'):
+                sig.connect(self._on_slider_changed)
+
+        # Wire curve editor interaction to update the sliders live
+        self.curve_editor.chemistry_changed.connect(self._on_curve_editor_changed)
+
+        # Active checkbox row at the top
+        top_form = _new_form_layout()
+        if 'active' in self._editors:
+            active_spec = next((s for s in self._manifest.fields if s.leaf == 'active'), None)
+            active_label = (
+                QLabel(_normalize_ui_text(active_spec.label or _format_label('active')))
+                if active_spec
+                else QLabel(_normalize_ui_text('active'))
+            )
+            if active_spec and active_spec.tooltip:
+                active_label.setToolTip(active_spec.tooltip)
+            top_form.addRow(active_label, self._editors['active'])
+
+        # Sliders form below the curve editor
+        sliders_form = _new_form_layout()
+        for spec in self._manifest.panel_fields or self._manifest.fields:
+            if spec.leaf == 'active':
+                continue
+            editor = self._editors[spec.leaf]
+            label = QLabel(_normalize_ui_text(spec.label or _format_label(spec.leaf)))
+            if spec.tooltip:
+                label.setToolTip(spec.tooltip)
+                editor.setToolTip(spec.tooltip)
+            sliders_form.addRow(label, editor)
+
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        content_layout.addLayout(top_form)
+        content_layout.addWidget(self.curve_editor)
+        content_layout.addLayout(sliders_form)
+
+        content = QWidget()
+        content.setLayout(content_layout)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(
+            CollapsibleSection(self._manifest.title, content, expanded=not self._manifest.collapsed_by_default),
+        )
+        self.setLayout(root)
+
+    def _on_slider_changed(self, *_args: Any) -> None:
+        if self._syncing_curve or self.curve_editor is None:
+            return
+        self._syncing_curve = True
+        try:
+            self.curve_editor.set_chemistry_params(self.get_state())
+        finally:
+            self._syncing_curve = False
+
+    def _on_curve_editor_changed(self, updates: dict[str, float]) -> None:
+        if self._syncing_curve:
+            return
+        self._syncing_curve = True
+        try:
+            for leaf, val in updates.items():
+                ed = self._editors.get(leaf)
+                if ed is not None:
+                    ed.value = val
+        finally:
+            self._syncing_curve = False
+
+    def set_state(self, group: Any) -> None:
+        super().set_state(group)
+        if self.curve_editor is not None:
+            self._syncing_curve = True
+            try:
+                self.curve_editor.set_chemistry_params(group)
+            finally:
+                self._syncing_curve = False
+
+    def set_histogram_image(self, image: Any) -> None:
+        """Forward image data to the curve editor to update background live histogram."""
+        if hasattr(self, "curve_editor") and hasattr(self.curve_editor, "set_histogram_image"):
+            self.curve_editor.set_histogram_image(image)
+
+
 class SpecialSection(QWidget):
     _is_params_group = True
 
@@ -558,6 +785,14 @@ class TuneSection(QWidget):
         super().__init__()
         self.setLayout(
             _build_path_panel('Tune', TUNE_PANEL_FIELDS, special_section._editors, expanded=True),
+        )
+
+
+class ComputePrecisionSection(QWidget):
+    def __init__(self, input_image_section: InputImageSection):
+        super().__init__()
+        self.setLayout(
+            _build_path_panel('Compute precision', PRECISION_PANEL_FIELDS, input_image_section._editors, expanded=True),
         )
 
 
@@ -638,7 +873,19 @@ class DisplaySection(QWidget):
             role='compactAction',
         )
         self.update_preview_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        form = _new_form_layout()
+        compute_form = _new_form_layout()
+        display_form = _new_form_layout()
+
+        from spektrafilm.cuda.device import is_cuda_available, get_device_info
+        if is_cuda_available():
+            info = get_device_info()
+            dev_name = info.get("device_name", "CUDA GPU")
+            mem_gb = info.get("total_memory_gb", 0.0)
+            self._hw_status_text = f"{dev_name} ({mem_gb:.1f} GB)"
+        else:
+            self._hw_status_text = "CPU (multi-core)"
+        self.hardware_label = QLabel(self._hw_status_text)
+
         for spec in DISPLAY_PANEL_FIELDS:
             editor = _editor_from_param_spec(_path_annotation(DisplayState, spec.path), spec, label=spec.path)
             self._editors[spec.leaf] = editor
@@ -650,8 +897,31 @@ class DisplaySection(QWidget):
             widget: QWidget = editor
             if spec.leaf == 'preview_max_size':
                 widget = _build_vertical_container(_build_button_row(editor, self.update_preview_button, spacing=4), spacing=0)
-            form.addRow(label, widget)
-        self.setLayout(_build_collapsible_form_section('Display', form, expanded=True))
+
+            if spec.leaf == 'device':
+                compute_form.addRow(label, widget)
+                hw_lbl = QLabel(_normalize_ui_text("detected gpu"))
+                hw_lbl.setToolTip("Hardware acceleration device detected on this system")
+                compute_form.addRow(hw_lbl, self.hardware_label)
+            else:
+                display_form.addRow(label, widget)
+
+        compute_content = QWidget()
+        compute_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        compute_content.setLayout(compute_form)
+        self.compute_section = CollapsibleSection(_normalize_ui_text('Compute device'), compute_content, expanded=True)
+
+        display_content = QWidget()
+        display_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        display_content.setLayout(display_form)
+        self.display_section = CollapsibleSection(_normalize_ui_text('Display'), display_content, expanded=True)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(int(SIZE_SECTION_STACK_SPACING.removesuffix('px')))
+        root.addWidget(self.compute_section)
+        root.addWidget(self.display_section)
+        self.setLayout(root)
 
     def set_state(self, state: DisplayState) -> None:
         self._source = state
@@ -675,7 +945,7 @@ class SimulationSection(QWidget):
     _skip_auto_preview_leaves = {'auto_preview', 'scan_film'}
     preview_requested = Signal()
     scan_requested = Signal()
-    save_requested = Signal()
+    save_requested = Signal((str,), ())
     _glare_section: 'ParamsGroupSection | None'
     _scanner_section: 'ParamsGroupSection | None'
     _scan_for_print_restore_state: dict[str, object] | None
@@ -716,13 +986,40 @@ class SimulationSection(QWidget):
             role='accentAction',
         )
         save_button_spec = _SIMULATION_ACTION_BUTTON_SPECS['save']
-        self.save_button = _build_button(
-            save_button_spec['text'],
-            self.save_requested.emit,
-            tooltip=save_button_spec['tooltip'],
-            preserve_case=save_button_spec['preserve_case'],
-            role='accentAction',
-        )
+        self.save_button = QPushButton(save_button_spec['text'])
+        self.save_button.setProperty('role', 'accentAction')
+        if save_button_spec.get('tooltip'):
+            self.save_button.setToolTip(save_button_spec['tooltip'])
+
+        self.save_menu = QMenu(self.save_button)
+        self.save_menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {GRAY_1};
+                color: {TEXT_MAIN};
+                border: 1px solid {GRAY_3};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 4px 18px 4px 14px;
+                border-radius: 5px;
+            }}
+            QMenu::item:selected {{
+                background-color: {ACCENT_COLOR_TEXT};
+                color: #000000;
+            }}
+        """)
+        for fmt, label in [
+            ('tif', 'TIF (.tif)'),
+            ('png', 'PNG (.png)'),
+            ('jpg', 'JPG (.jpg)'),
+            ('webp', 'WEBP (.webp)'),
+        ]:
+            action = self.save_menu.addAction(label)
+            action.triggered.connect(lambda checked=False, f=fmt: self.save_requested.emit(f))
+
+        self.save_button.setMenu(self.save_menu)
+        self.save_button.clicked.connect(self.save_button.showMenu)
 
         scan_film_row = QHBoxLayout()
         scan_film_row.setContentsMargins(0, 0, 0, 0)

@@ -321,7 +321,7 @@ def test_build_controls_panel_places_gamut_compression_sections_on_advanced_tab(
         def setSpacing(self, _spacing: int) -> None:
             pass
 
-        def addWidget(self, _widget) -> None:
+        def addWidget(self, _widget, *_args, **_kwargs) -> None:
             pass
 
     monkeypatch.setattr(napari_layout_module.QtWidgets, 'QVBoxLayout', FakeVBoxLayout)
@@ -337,7 +337,7 @@ def test_build_controls_panel_places_gamut_compression_sections_on_advanced_tab(
         input_image='input_image',
         input_gamut_compress='input_gamut_compress',
         camera='camera',
-        simulation='simulation',
+        simulation=SimpleNamespace(action_bar=lambda: 'action_bar'),
         exposure_control='exposure_control',
         enlarger='enlarger',
         scanner='scanner',
@@ -352,15 +352,16 @@ def test_build_controls_panel_places_gamut_compression_sections_on_advanced_tab(
         preflashing='preflashing',
         enlarger_diffusion='enlarger_diffusion',
         spectral_upsampling='spectral_upsampling',
+        compute_precision='compute_precision',
         tune='tune',
         special='special',
         gui_config='gui_config',
         display='display',
     )
 
-    panel = napari_layout_module.build_controls_panel(SimpleNamespace(), widgets)
+    container = napari_layout_module.build_controls_panel(SimpleNamespace(), widgets)
 
-    assert isinstance(panel, FakeTabWidget)
+    assert container is not None
     tabs = {label: sections for label, sections in captured_tabs}
     assert 'input_gamut_compress' not in tabs['MAIN']
     assert 'output_gamut_compress' not in tabs['MAIN']
@@ -368,6 +369,83 @@ def test_build_controls_panel_places_gamut_compression_sections_on_advanced_tab(
         'spectral_upsampling',
         'input_gamut_compress',
         'output_gamut_compress',
+        'compute_precision',
         'tune',
         'special',
     )
+
+
+def test_viewport_container_wraps_viewer_with_internal_rounded_borders() -> None:
+    from qtpy import QtWidgets, QtCore, QtGui
+    from qtpy.QtCore import Qt
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from spektrafilm_gui.napari_layout import (
+        ViewportContainer,
+        ViewportRoundedOverlay,
+        _build_viewer_panel,
+    )
+    from spektrafilm_gui.theme_palette import RADIUS_CARD_NUM
+
+    dummy_viewer_widget = QtWidgets.QWidget()
+    status_bar = QtWidgets.QStatusBar()
+
+    panel = _build_viewer_panel(dummy_viewer_widget, status_bar)
+
+    assert hasattr(panel, 'viewport_container')
+    assert isinstance(panel.viewport_container, ViewportContainer)
+    assert panel.viewport_container.viewer_widget is dummy_viewer_widget
+    assert isinstance(panel.viewport_container._overlay, ViewportRoundedOverlay)
+    assert panel.viewport_container._radius == RADIUS_CARD_NUM
+
+    # Transparent for mouse events so interaction passes directly to canvas
+    assert panel.viewport_container._overlay.testAttribute(Qt.WA_TransparentForMouseEvents)
+
+    # Resize standalone container and verify overlay geometry updates
+    standalone_container = ViewportContainer(QtWidgets.QWidget())
+    standalone_container.resize(600, 400)
+    standalone_container.resizeEvent(
+        QtGui.QResizeEvent(QtCore.QSize(600, 400), standalone_container.size())
+    )
+    assert standalone_container._overlay.size() == standalone_container.size()
+
+
+def test_strip_viewer_margins_clears_canvas_ancestor_margins() -> None:
+    from qtpy import QtWidgets, QtGui
+    from spektrafilm_gui.napari_layout import _strip_viewer_margins, ViewportContainer
+
+    root = QtWidgets.QWidget()
+    root_layout = QtWidgets.QHBoxLayout(root)
+    root_layout.setContentsMargins(4, 0, 4, 0)
+    root_layout.setSpacing(6)
+
+    inner = QtWidgets.QWidget(root)
+    inner_layout = QtWidgets.QVBoxLayout(inner)
+    inner_layout.setContentsMargins(0, 2, 0, 2)
+    inner_layout.setSpacing(4)
+    root_layout.addWidget(inner)
+
+    class DummyCanvasWidget(QtWidgets.QWidget):
+        pass
+
+    canvas = DummyCanvasWidget(inner)
+    inner_layout.addWidget(canvas)
+
+    _strip_viewer_margins(root)
+
+    assert root_layout.contentsMargins().left() == 0
+    assert root_layout.contentsMargins().right() == 0
+    assert root_layout.spacing() == 0
+
+    assert inner_layout.contentsMargins().top() == 0
+    assert inner_layout.contentsMargins().bottom() == 0
+    assert inner_layout.spacing() == 0
+
+    # Test ViewportContainer calls it on init and showEvent
+    root_layout.setContentsMargins(5, 5, 5, 5)
+    container = ViewportContainer(root)
+    assert root_layout.contentsMargins().left() == 0
+
+    root_layout.setContentsMargins(3, 3, 3, 3)
+    container.showEvent(QtGui.QShowEvent())
+    assert root_layout.contentsMargins().left() == 0
+

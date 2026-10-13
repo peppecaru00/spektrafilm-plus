@@ -45,3 +45,51 @@ def test_rgb_to_film_raw_passes_linear_sensitivity_to_hanatos2025(monkeypatch) -
     getattr(stage, '_rgb_to_film_raw')(rgb)
 
     np.testing.assert_allclose(captured['sensitivity'], 10.0 ** log_sensitivity)
+
+
+def test_positive_film_scan_produces_non_black_image() -> None:
+    from spektrafilm.profiles.io import load_profile
+    from spektrafilm.runtime.params_schema import RuntimePhotoParams
+    from spektrafilm.runtime.pipeline import SimulationPipeline
+
+    film = load_profile('kodak_ektachrome_100')
+    paper = load_profile('kodak_endura_premier')
+    params = RuntimePhotoParams(film=film, print=paper)
+    params.io.scan_film = True
+    params.settings.preview_mode = True
+
+    pipeline = SimulationPipeline(params)
+    img = np.full((32, 32, 3), 0.184, dtype=np.float64)
+    out = pipeline.process(img)
+
+    assert out.shape == (32, 32, 3)
+    assert np.mean(out) > 0.05, f"Expected non-black image for Ektachrome 100 scan, got mean {np.mean(out)}"
+
+
+def test_scan_film_responds_to_chemistry_gamma_morph() -> None:
+    from dataclasses import replace
+    from spektrafilm.profiles.io import load_profile
+    from spektrafilm.runtime.params_schema import RuntimePhotoParams
+    from spektrafilm.runtime.pipeline import SimulationPipeline
+
+    film = load_profile('kodak_ektachrome_100')
+    paper = load_profile('kodak_endura_premier')
+    params = RuntimePhotoParams(film=film, print=paper)
+    params.io.scan_film = True
+    params.settings.preview_mode = True
+
+    img = np.full((32, 32, 3), 0.184, dtype=np.float64)
+
+    params.print_render.density_curves_morph = replace(
+        params.print_render.density_curves_morph, active=True, gamma_factor=0.7
+    )
+    p_low = SimulationPipeline(params)
+    out_low = p_low.process(img)
+
+    params.print_render.density_curves_morph = replace(
+        params.print_render.density_curves_morph, active=True, gamma_factor=1.3
+    )
+    p_high = SimulationPipeline(params)
+    out_high = p_high.process(img)
+
+    assert np.max(np.abs(out_low - out_high)) > 0.1, "Chemistry gamma should significantly alter scanned positive film"

@@ -76,25 +76,38 @@ class ScanningStage:
         illuminant_xyz = contract("k,kl->l", scan_illuminant, STANDARD_OBSERVER_CMFS[:]) / normalization
         illuminant_xy = colour.XYZ_to_xy(illuminant_xyz)
         xyz = add_glare(xyz, illuminant_xyz, glare)
-        rgb = colour.XYZ_to_RGB(
-            xyz,
-            colourspace=self._io.output_color_space,
-            apply_cctf_encoding=False,
-            illuminant=illuminant_xy,
-        )
-        # Output gamut compression. Compresses chromaticities the
-        # simulation reached that fall outside the output primaries
-        # cube; for perceptual algorithms (oklch / oklrab / jzazbz /
-        # cam16ucs) the spec's lightness_compression also pulls
-        # super-bright pixels back into the cube via a one-sided soft
-        # roll-off on the perceptual lightness axis (black stays at 0).
-        # With both in place the output is in [0, 1] without a
-        # downstream clip; see n100 / n110 for the design and b40 for
-        # the smoothness analysis.
-        rgb = compress_rgb(
-            rgb, self._io.output_gamut_compress,
-            output_color_space=self._io.output_color_space,
-        )
+        from spektrafilm.cuda.device import is_cupy_array
+        if is_cupy_array(xyz):
+            from spektrafilm.cuda.color import get_xyz_to_rgb_matrix, cuda_apply_matrix
+            from spektrafilm.cuda.gamut_compression import cuda_compress_rgb
+            m = get_xyz_to_rgb_matrix(self._io.output_color_space, tuple(illuminant_xy), cat="CAT02")
+            rgb = cuda_apply_matrix(xyz, m)
+            is_preview = getattr(self._settings, "preview_mode", False)
+            rgb = cuda_compress_rgb(
+                rgb, self._io.output_gamut_compress,
+                output_color_space=self._io.output_color_space,
+                preview_mode=is_preview,
+            )
+        else:
+            rgb = colour.XYZ_to_RGB(
+                xyz,
+                colourspace=self._io.output_color_space,
+                apply_cctf_encoding=False,
+                illuminant=illuminant_xy,
+            )
+            # Output gamut compression. Compresses chromaticities the
+            # simulation reached that fall outside the output primaries
+            # cube; for perceptual algorithms (oklch / oklrab / jzazbz /
+            # cam16ucs) the spec's lightness_compression also pulls
+            # super-bright pixels back into the cube via a one-sided soft
+            # roll-off on the perceptual lightness axis (black stays at 0).
+            # With both in place the output is in [0, 1] without a
+            # downstream clip; see n100 / n110 for the design and b40 for
+            # the smoothness analysis.
+            rgb = compress_rgb(
+                rgb, self._io.output_gamut_compress,
+                output_color_space=self._io.output_color_space,
+            )
         return rgb
 
     def _return_callable_cmy_to_log_xyz(self):
@@ -110,17 +123,59 @@ class ScanningStage:
         normalization = np.sum(scan_illuminant * STANDARD_OBSERVER_CMFS[:, 1], axis=0)
 
         def cmy_to_log_xyz(density_cmy: np.ndarray) -> np.ndarray:
-            density_spectral = compute_density_spectral(
-                channel_density,
-                density_cmy,
-                base_density,
-            )
-            light = density_to_light(density_spectral, scan_illuminant)
-            xyz = contract("ijk,kl->ijl", light, STANDARD_OBSERVER_CMFS[:]) / normalization
-            return np.log10(np.fmax(xyz, 0.0) + 1e-10)
+            from spektrafilm.cuda.device import is_cupy_array, get_array_module
+            if is_cupy_array(density_cmy):
+                from spektrafilm.cuda.spectral import cuda_fused_spectral_integrate
+                xyz = cuda_fused_spectral_integrate(
+                    density_cmy,
+                    channel_density,
+                    base_density=base_density,
+                    illuminant=scan_illuminant,
+                    response_curves=STANDARD_OBSERVER_CMFS[:],
+                    normalization=normalization,
+                )
+            else:
+                H = density_cmy.shape[0] if density_cmy.ndim == 3 else 1
+                if density_cmy.ndim == 3 and H > 256:
+                    chunk_size = 256
+                    target_dtype = density_cmy.dtype
+                    xyz = np.empty((*density_cmy.shape[:2], 3), dtype=target_dtype)
+                    cd = np.asarray(channel_density, dtype=target_dtype)
+                    bd = np.asarray(base_density, dtype=target_dtype) if base_density is not None else None
+                    s_ill = np.asarray(scan_illuminant, dtype=target_dtype)
+                    cmfs = np.asarray(STANDARD_OBSERVER_CMFS[:], dtype=target_dtype)
+                    norm = np.asarray(normalization, dtype=target_dtype)
+                    for y_start in range(0, H, chunk_size):
+                        y_end = min(y_start + chunk_size, H)
+                        chunk_cmy = density_cmy[y_start:y_end]
+                        d_spec = compute_density_spectral(cd, chunk_cmy, bd)
+                        chunk_light = density_to_light(d_spec, s_ill)
+                        xyz[y_start:y_end] = contract("ijk,kl->ijl", chunk_light, cmfs) / norm
+                        del d_spec, chunk_light
+                else:
+                    density_spectral = compute_density_spectral(
+                        channel_density,
+                        density_cmy,
+                        base_density,
+                    )
+                    light = density_to_light(density_spectral, scan_illuminant)
+                    xyz = contract("ijk,kl->ijl", light, STANDARD_OBSERVER_CMFS[:]) / normalization
+            xp = get_array_module(xyz)
+            return xp.log10(xp.fmax(xyz, 0.0) + 1e-10)
         return cmy_to_log_xyz
 
     def _apply_blur_and_unsharp(self, rgb: np.ndarray) -> np.ndarray:
+        from spektrafilm.cuda.device import is_cupy_array
+        if is_cupy_array(rgb):
+            from spektrafilm.cuda.filters import cuda_gaussian_filter
+            if self._scanner.lens_blur > 0:
+                rgb = cuda_gaussian_filter(rgb, self._scanner.lens_blur)
+            sigma, amount = self._scanner.unsharp_mask
+            if sigma > 0 and amount > 0:
+                blurred = cuda_gaussian_filter(rgb, sigma)
+                rgb = rgb + amount * (rgb - blurred)
+            return rgb
+
         rgb = apply_gaussian_blur(rgb, self._scanner.lens_blur)
         sigma, amount = self._scanner.unsharp_mask
         if sigma > 0 and amount > 0:
@@ -129,7 +184,11 @@ class ScanningStage:
 
     def _apply_cctf_encoding(self, rgb: np.ndarray) -> np.ndarray:
         if self._io.output_cctf_encoding:
-            rgb = colour.RGB_to_RGB(
+            from spektrafilm.cuda.device import is_cupy_array
+            if is_cupy_array(rgb):
+                from spektrafilm.cuda.color import cuda_cctf_encoding
+                return cuda_cctf_encoding(rgb, self._io.output_color_space)
+            return colour.RGB_to_RGB(
                 rgb,
                 self._io.output_color_space,
                 self._io.output_color_space,

@@ -164,3 +164,64 @@ def test_compute_hanatos2025_tc_lut_normalizes_window_to_preserve_midgray(monkey
     normalization = np.sum(sensitivity * illuminant[:, None] * window, axis=0) / np.sum(sensitivity * illuminant[:, None], axis=0)
     expected = np.einsum('ijl,lm->ijm', lut, sensitivity * (window / normalization))
     np.testing.assert_allclose(raw_lut, expected)
+
+
+def test_lut_registry_contains_arctic2026beta04_and_hanatos2025():
+    available = spectral_upsampling_module.available_lut_identifiers()
+    assert 'arctic2026beta04' in available
+    assert 'hanatos2025' in available
+
+    desc = spectral_upsampling_module.lut_descriptor('arctic2026beta04')
+    assert desc['kind'] == 'reflectance'
+    assert desc['identifier'] == 'arctic2026beta04'
+    assert desc['reflectance']['scene_illuminant'] == 'D65'
+
+    spectra = spectral_upsampling_module.get_lut_spectra('arctic2026beta04')
+    assert spectra.shape == (192, 192, 81)
+
+
+def test_compute_reflectance_tc_lut_arctic2026beta04():
+    sensitivity = np.ones((81, 3), dtype=np.float64)
+    tc_lut = spectral_upsampling_module.compute_tc_lut('arctic2026beta04', sensitivity, 'D55')
+    assert tc_lut.shape == (192, 192, 3)
+    assert np.all(np.isfinite(tc_lut))
+    assert np.all(tc_lut >= 0)
+
+
+def test_rgb_to_raw_arctic2026beta04_preserves_neutral_midgray():
+    sensitivity = np.ones((81, 3), dtype=np.float64)
+    tc_lut = spectral_upsampling_module.compute_tc_lut('arctic2026beta04', sensitivity, 'D55')
+    midgray_rgb = np.full((1, 1, 3), 0.184, dtype=np.float64)
+
+    raw = spectral_upsampling_module.rgb_to_raw(
+        'arctic2026beta04',
+        midgray_rgb,
+        sensitivity,
+        color_space='sRGB',
+        apply_cctf_decoding=False,
+        reference_illuminant='D55',
+        tc_lut=tc_lut,
+    )
+    assert raw.shape == (1, 1, 3)
+    # Neutral balance: all 3 channels should be identical
+    np.testing.assert_allclose(raw[0, 0, 0], raw[0, 0, 1], rtol=1e-5)
+    np.testing.assert_allclose(raw[0, 0, 1], raw[0, 0, 2], rtol=1e-5)
+
+
+def test_simulation_pipeline_with_arctic2026beta04():
+    from spektrafilm.runtime.params_schema import RuntimePhotoParams
+    from spektrafilm.profiles.io import load_profile
+    from spektrafilm.runtime.pipeline import SimulationPipeline
+
+    film = load_profile('kodak_portra_400')
+    paper = load_profile('kodak_endura_premier')
+    params = RuntimePhotoParams(film=film, print=paper)
+    params.settings.preview_mode = True
+    params.settings.rgb_to_raw_method = 'arctic2026beta04'
+
+    pipeline = SimulationPipeline(params)
+    image = np.full((16, 16, 3), 0.184, dtype=np.float32)
+    result = pipeline.process(image)
+    assert result.shape == (16, 16, 3)
+    assert np.all(np.isfinite(result))
+

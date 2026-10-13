@@ -26,13 +26,19 @@ def interpolate_exposure_to_density(log_exposure_rgb, density_curves, log_exposu
     #     density_cmy[:,:,channel] = np.interp(log_exposure_rgb[:,:,channel],
     #                                          log_exposure[sel]/gamma_factor[channel],
     #                                          density_curves[sel,channel])
-    density_cmy = fast_interp(np.ascontiguousarray(log_exposure_rgb),
+    from spektrafilm.cuda.device import get_array_module, is_cupy_array
+    xp = get_array_module(log_exposure_rgb)
+    density_cmy = fast_interp(xp.ascontiguousarray(log_exposure_rgb),
                               log_exposure[:,None]/gamma_factor[None,:],
                               density_curves)
     return density_cmy
 
 
 def interp_density_cmy_layers(density_cmy, density_curves, density_curves_layers, positive_film=False):
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(density_cmy):
+        from spektrafilm.cuda.grain import cuda_interp_density_cmy_layers
+        return cuda_interp_density_cmy_layers(density_cmy, density_curves, density_curves_layers, positive_film=positive_film)
     density_cmy_layers = np.zeros((density_cmy.shape[0], density_cmy.shape[1], 3, 3)) # x,y,layer,rgb
     if positive_film:
         for ch in np.arange(3):

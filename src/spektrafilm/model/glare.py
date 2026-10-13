@@ -13,6 +13,10 @@ def add_glare(xyz: np.ndarray, illuminant_xyz: np.ndarray, glare) -> np.ndarray:
             glare.blur,
             xyz.shape[:2],
         )
+        from spektrafilm.cuda.device import is_cupy_array, to_device
+        if is_cupy_array(xyz):
+            glare_amount = to_device(glare_amount)
+            illuminant_xyz = to_device(illuminant_xyz)
         xyz = xyz + glare_amount[:, :, None] * illuminant_xyz[None, None, :]
     return xyz
 

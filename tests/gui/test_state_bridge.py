@@ -120,6 +120,7 @@ def _make_widgets(state: GuiState) -> WidgetBundle:
         exposure_control=object(),
         enlarger=object(),
         spectral_upsampling=object(),
+        compute_precision=object(),
         tune=object(),
         output=object(),
     )

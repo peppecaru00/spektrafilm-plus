@@ -1,5 +1,9 @@
 """Public package exports for spektrafilm."""
 
+import warnings
+
+warnings.filterwarnings("ignore", message=".*CUDA path could not be detected.*", category=UserWarning)
+
 from spektrafilm.profiles.io import load_profile, save_profile
 from spektrafilm.runtime.api import digest_params, init_params
 from spektrafilm.runtime.process import Simulator, simulate, simulate_preview, AgXPhoto, photo_params

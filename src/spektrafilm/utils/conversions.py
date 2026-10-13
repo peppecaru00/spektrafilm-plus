@@ -19,6 +19,10 @@ def density_to_light(density, light):
     Returns:
     np.ndarray: The light intensity after passing through the medium with the given density.
     """
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(density):
+        from spektrafilm.cuda.spectral import cuda_density_to_light
+        return cuda_density_to_light(density, light)
     transmitted = 10**(-density)
     transmitted *= light
     transmitted[np.isnan(transmitted)] = 0

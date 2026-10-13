@@ -74,6 +74,42 @@ def boost_highlights(
     if midgray < 0.0:
         raise ValueError("midgray must be >= 0")
 
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(x):
+        import cupy as cp
+        if boost_ev == 0:
+            if out is not None:
+                out[...] = x
+                return out
+            return x.copy()
+        max_raw = float(cp.max(x))
+        if max_raw == 0.0:
+            if out is not None:
+                out.fill(0.0)
+                return out
+            return cp.zeros_like(x)
+        raw_x0 = float(np.clip(midgray * (2.0 ** protect_ev), 0.0, max_raw))
+        if raw_x0 == max_raw:
+            if out is not None:
+                out[...] = x
+                return out
+            return x.copy()
+        a = 28.0 ** (1.0 - boost_range)
+        x0 = raw_x0 / max_raw
+        denom = np.exp(a * (1.0 - x0)) - a * (1.0 - x0) - 1.0
+        if denom <= 0.0:
+            raise ValueError("Invalid parameters: denominator for k is non-positive")
+        k = (2.0 ** boost_ev - 1.0) / denom
+        inv_max_raw = 1.0 / max_raw
+        boost_scale = max_raw * k
+        dx = cp.maximum((x - raw_x0) * inv_max_raw, 0.0)
+        b = boost_scale * (cp.exp(a * dx) - a * dx - 1.0)
+        y = x + cp.where(x > raw_x0, b, 0.0)
+        if out is not None:
+            out[...] = y
+            return out
+        return y
+
     x = np.asarray(x, dtype=np.float64)
     if x.ndim != 3:
         raise ValueError("x must be a 3D array, e.g. HxWxC")

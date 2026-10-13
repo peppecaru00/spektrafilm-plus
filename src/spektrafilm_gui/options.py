@@ -14,6 +14,7 @@ class RGBColorSpaces(Enum):
 
 
 class RGBtoRAWMethod(Enum):
+    arctic2026beta04 = "arctic2026beta04"
     hanatos2025 = "hanatos2025"
     mallett2019 = "mallett2019"
 
@@ -23,6 +24,13 @@ class RawWhiteBalance(Enum):
     daylight = "daylight"
     tungsten = "tungsten"
     custom = "custom"
+
+
+class RawHighlightMode(Enum):
+    reconstruct = "reconstruct"
+    blend = "blend"
+    clip = "clip"
+    ignore = "ignore"
 
 
 class AutoExposureMethods(Enum):
@@ -64,5 +72,16 @@ class OutputGamutCompressAlgorithms(Enum):
     oklrab = "oklrab"
     jzazbz = "jzazbz"
     cam16ucs = "cam16ucs"
+
+
+class ComputeDevice(Enum):
+    auto = "auto"
+    cuda = "cuda"
+    cpu = "cpu"
+
+
+class ProcessingPrecision(Enum):
+    float32 = "float32"
+    float64 = "float64"
 
 

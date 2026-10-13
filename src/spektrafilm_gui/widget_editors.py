@@ -222,7 +222,7 @@ class BoolEditor(QtWidgets.QCheckBox):
 
             painter.setPen(QtGui.QPen(border_color, 1))
             painter.setBrush(checked_color if self.isChecked() else fill_color)
-            painter.drawRect(indicator_rect)
+            painter.drawRoundedRect(indicator_rect, 4, 4)
 
             if self.isChecked():
                 self._draw_check_mark(painter, indicator_rect)
@@ -243,7 +243,7 @@ class BoolEditor(QtWidgets.QCheckBox):
     @staticmethod
     def _draw_check_mark(painter: QtGui.QPainter, indicator_rect) -> None:
         painter.setPen(
-            QtGui.QPen(resolve_theme_qcolor(BOOL_EDITOR_CHECKMARK), 1.6, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin),
+            QtGui.QPen(resolve_theme_qcolor(BOOL_EDITOR_CHECKMARK), 2.2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin),
         )
         painter.drawLine(
             QPointF(indicator_rect.left() + 3.0, indicator_rect.center().y() + 0.5),

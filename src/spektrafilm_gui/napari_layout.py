@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Callable
 from typing import Any, cast
 
 from qtpy import QtGui, QtWidgets
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QRectF, Qt
 
 if TYPE_CHECKING:
     import napari
@@ -22,7 +22,10 @@ QWidget = QtWidgets.QWidget
 from spektrafilm_gui.theme import APP_STYLE_SHEET
 from spektrafilm_gui.theme_palette import (
     GRAY_0,
+    GRAY_3,
     GRAY_18,
+    PANEL_BG,
+    RADIUS_CARD_NUM,
     SIZE_APP_MARGIN,
     SIZE_FOOTER_BOTTOM_INSET,
     SIZE_FOOTER_MIN_HEIGHT,
@@ -38,6 +41,7 @@ from spektrafilm_gui.widgets import CollapsibleSection, platform_default_font
 
 DEFAULT_CONTROLS_PANEL_WIDTH = 420
 DEFAULT_VIEWER_SPLITTER_WIDTH = 1040
+DEFAULT_GALLERY_WIDTH = 250
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
 class AppMainWindow(QMainWindow):
@@ -161,6 +165,38 @@ def _host_window(viewer: napari.Viewer) -> QWidget | None:
     return None
 
 
+def _strip_viewer_margins(widget: object) -> None:
+    """Recursively clear structural layout margins and spacing around the viewer canvas."""
+    layout_getter = getattr(widget, 'layout', None)
+    if not callable(layout_getter):
+        return
+    layout = layout_getter()
+    if layout is not None and hasattr(layout, 'setContentsMargins'):
+        layout.setContentsMargins(0, 0, 0, 0)
+        if hasattr(layout, 'setSpacing'):
+            layout.setSpacing(0)
+    find_children = getattr(widget, 'findChildren', None)
+    if not callable(find_children):
+        return
+    for child in find_children(QtWidgets.QWidget):
+        child_layout = child.layout()
+        if child_layout is not None and isinstance(child_layout, (QtWidgets.QHBoxLayout, QtWidgets.QVBoxLayout)):
+            contains_canvas = False
+            for i in range(child_layout.count()):
+                item = child_layout.itemAt(i)
+                w = item.widget() if item is not None else None
+                if w is not None and (
+                    'Canvas' in w.__class__.__name__
+                    or 'WidgetOverlay' in w.__class__.__name__
+                    or 'QtViewer' in w.__class__.__name__
+                ):
+                    contains_canvas = True
+                    break
+            if contains_canvas:
+                child_layout.setContentsMargins(0, 0, 0, 0)
+                child_layout.setSpacing(0)
+
+
 def take_viewer_widget(viewer: napari.Viewer) -> QWidget:
     viewer_window = getattr(viewer, 'window', None)
     if viewer_window is None:
@@ -172,10 +208,12 @@ def take_viewer_widget(viewer: napari.Viewer) -> QWidget:
         if callable(take_central_widget):
             central_widget = take_central_widget()
             if central_widget is not None:
+                _strip_viewer_margins(central_widget)
                 return central_widget
 
     qt_viewer = getattr(viewer_window, '_qt_viewer', None)
     if qt_viewer is not None:
+        _strip_viewer_margins(qt_viewer)
         return qt_viewer
     raise RuntimeError('Napari Qt viewer widget is not available')
 
@@ -315,16 +353,92 @@ def set_viewer_zoom_percent(viewer: napari.Viewer, percent: float) -> None:
     camera.zoom = max((pixel_ratio * zoom_scale) / layer_pixel_world_size, pixel_ratio * 0.01)
 
 
+class ViewportRoundedOverlay(QtWidgets.QWidget):
+    """Transparent overlay painting an antialiased internal rounded border and corner mask."""
+
+    def __init__(self, parent: QtWidgets.QWidget, radius: float = RADIUS_CARD_NUM) -> None:
+        super().__init__(parent)
+        self._radius = radius
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        try:
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+            rect = QRectF(self.rect())
+            r = self._radius
+
+            stroke_rect = rect.adjusted(0.5, 0.5, -0.5, -0.5)
+            outer_path = QtGui.QPainterPath()
+            outer_path.addRect(rect)
+            inner_path = QtGui.QPainterPath()
+            inner_path.addRoundedRect(stroke_rect, r, r)
+            corner_cutout = outer_path.subtracted(inner_path)
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QtGui.QColor(PANEL_BG))
+            painter.drawPath(corner_cutout)
+
+            # 2. Draw subtle crisp internal rounded border
+            painter.setPen(QtGui.QPen(QtGui.QColor(GRAY_3), 1.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(stroke_rect, r, r)
+        finally:
+            painter.end()
+
+
+class ViewportContainer(QtWidgets.QFrame):
+    """Container frame wrapping the viewer widget with an internal rounded border."""
+
+    def __init__(
+        self,
+        viewer_widget: QWidget,
+        radius: float = RADIUS_CARD_NUM,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName('viewportContainer')
+        self._radius = radius
+        self.viewer_widget = viewer_widget
+
+        _strip_viewer_margins(viewer_widget)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(viewer_widget, 1)
+
+        self._overlay = ViewportRoundedOverlay(self, radius=radius)
+        self._overlay.setGeometry(self.rect())
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._overlay.setGeometry(self.rect())
+        self._overlay.raise_()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        _strip_viewer_margins(self.viewer_widget)
+        self._overlay.setGeometry(self.rect())
+        self._overlay.raise_()
+
+
 def _build_viewer_panel(
     viewer_widget: QWidget,
     status_bar: QStatusBar,
     *,
+    gallery_widget: QWidget | None = None,
     on_rotate_ccw: Callable[[], None] | None = None,
     on_rotate_cw: Callable[[], None] | None = None,
     on_zoom_100: Callable[[], None] | None = None,
     on_zoom_200: Callable[[], None] | None = None,
     on_zoom_400: Callable[[], None] | None = None,
     on_home_view: Callable[[], None] | None = None,
+    on_undo: Callable[[], None] | None = None,
+    on_redo: Callable[[], None] | None = None,
 ) -> QFrame:
     panel = QtWidgets.QFrame()
     panel.setObjectName('viewerPanel')
@@ -337,6 +451,20 @@ def _build_viewer_panel(
     status_bar.setContentsMargins(0, 0, 0, 0)
     status_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
     status_layout.addWidget(status_bar, 1)
+
+    undo_button = QPushButton('↺ undo')
+    undo_button.setObjectName('undoButton')
+    undo_button.setToolTip('Undo parameter change (Ctrl+Z)')
+    undo_button.setEnabled(False)
+    if on_undo is not None:
+        undo_button.clicked.connect(on_undo)
+
+    redo_button = QPushButton('↻ redo')
+    redo_button.setObjectName('redoButton')
+    redo_button.setToolTip('Redo parameter change (Ctrl+Y, Ctrl+Shift+Z)')
+    redo_button.setEnabled(False)
+    if on_redo is not None:
+        redo_button.clicked.connect(on_redo)
 
     rotate_ccw_button = QPushButton('ccw rotate')
     rotate_ccw_button.setObjectName('rotateCcwButton')
@@ -371,6 +499,8 @@ def _build_viewer_panel(
     if on_home_view is not None:
         home_button.clicked.connect(on_home_view)
     row_height = int(SIZE_FOOTER_MIN_HEIGHT.removesuffix('px'))
+    undo_button.setFixedHeight(row_height)
+    redo_button.setFixedHeight(row_height)
     rotate_ccw_button.setFixedHeight(row_height)
     rotate_cw_button.setFixedHeight(row_height)
     zoom_100_button.setFixedHeight(row_height)
@@ -379,6 +509,8 @@ def _build_viewer_panel(
     home_button.setFixedHeight(row_height)
     status_bar.setFixedHeight(row_height)
     status_container.setFixedHeight(row_height)
+    status_layout.addWidget(undo_button)
+    status_layout.addWidget(redo_button)
     status_layout.addWidget(rotate_ccw_button)
     status_layout.addWidget(rotate_cw_button)
     status_layout.addWidget(zoom_100_button)
@@ -389,9 +521,17 @@ def _build_viewer_panel(
     layout = QtWidgets.QVBoxLayout(panel)
     layout.setContentsMargins(SIZE_PANEL_MARGIN, SIZE_PANEL_MARGIN, divider_gap, SIZE_FOOTER_BOTTOM_INSET)
     layout.setSpacing(0)
-    layout.addWidget(viewer_widget, 1)
+    if isinstance(viewer_widget, QWidget):
+        viewport_container = ViewportContainer(viewer_widget, radius=RADIUS_CARD_NUM, parent=panel)
+        layout.addWidget(viewport_container, 1)
+        panel.viewport_container = viewport_container
+    else:
+        layout.addWidget(viewer_widget, 1)
     layout.addSpacing(SIZE_FOOTER_TOP_SPACING)
     layout.addWidget(status_container)
+    panel.viewer_widget = viewer_widget
+    panel.undo_button = undo_button
+    panel.redo_button = redo_button
     return panel
 
 
@@ -429,6 +569,7 @@ def build_controls_panel(viewer: napari.Viewer, widgets: WidgetBundle) -> QWidge
                 widgets.spectral_upsampling,
                 widgets.input_gamut_compress,
                 widgets.output_gamut_compress,
+                widgets.compute_precision,
                 widgets.tune,
                 widgets.special,
             ),
@@ -470,8 +611,11 @@ def build_main_window(
     viewer: napari.Viewer,
     controls_panel: QWidget,
     *,
+    gallery_widget: QWidget | None = None,
     on_rotate_ccw: Callable[[], None] | None = None,
     on_rotate_cw: Callable[[], None] | None = None,
+    on_undo: Callable[[], None] | None = None,
+    on_redo: Callable[[], None] | None = None,
 ) -> QMainWindow:
     viewer_widget = take_viewer_widget(viewer)
     status_bar = QtWidgets.QStatusBar()
@@ -480,7 +624,10 @@ def build_main_window(
     main_window = AppMainWindow()
     main_window.setWindowTitle('spektrafilm')
     main_window.setWindowIcon(QIcon())
-    main_window.resize(DEFAULT_CONTROLS_PANEL_WIDTH + DEFAULT_VIEWER_SPLITTER_WIDTH, 980)
+    total_width = DEFAULT_CONTROLS_PANEL_WIDTH + DEFAULT_VIEWER_SPLITTER_WIDTH
+    if gallery_widget is not None:
+        total_width += DEFAULT_GALLERY_WIDTH
+    main_window.resize(total_width, 980)
     main_window.setFont(platform_default_font())
     main_window.setStyleSheet(APP_STYLE_SHEET)
     main_window.set_viewer_status_bar(status_bar)
@@ -488,22 +635,35 @@ def build_main_window(
 
     splitter = QtWidgets.QSplitter(Qt.Horizontal)
     splitter.setChildrenCollapsible(False)
-    splitter.addWidget(
-        _build_viewer_panel(
-            viewer_widget,
-            status_bar,
-            on_rotate_ccw=on_rotate_ccw,
-            on_rotate_cw=on_rotate_cw,
-            on_zoom_100=lambda: set_viewer_zoom_percent(viewer, 100.0),
-            on_zoom_200=lambda: set_viewer_zoom_percent(viewer, 200.0),
-            on_zoom_400=lambda: set_viewer_zoom_percent(viewer, 400.0),
-            on_home_view=lambda: reset_viewer_camera(viewer),
-        )
+    splitter.setHandleWidth(4)
+    if gallery_widget is not None:
+        splitter.addWidget(gallery_widget)
+    viewer_panel = _build_viewer_panel(
+        viewer_widget,
+        status_bar,
+        on_rotate_ccw=on_rotate_ccw,
+        on_rotate_cw=on_rotate_cw,
+        on_zoom_100=lambda: set_viewer_zoom_percent(viewer, 100.0),
+        on_zoom_200=lambda: set_viewer_zoom_percent(viewer, 200.0),
+        on_zoom_400=lambda: set_viewer_zoom_percent(viewer, 400.0),
+        on_home_view=lambda: reset_viewer_camera(viewer),
+        on_undo=on_undo,
+        on_redo=on_redo,
     )
+    main_window.viewer_panel = viewer_panel
+    main_window.undo_button = getattr(viewer_panel, 'undo_button', None)
+    main_window.redo_button = getattr(viewer_panel, 'redo_button', None)
+    splitter.addWidget(viewer_panel)
     splitter.addWidget(_build_sidebar(controls_panel))
-    splitter.setStretchFactor(0, 1)
-    splitter.setStretchFactor(1, 0)
-    splitter.setSizes([DEFAULT_VIEWER_SPLITTER_WIDTH, DEFAULT_CONTROLS_PANEL_WIDTH])
+    if gallery_widget is not None:
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([DEFAULT_GALLERY_WIDTH, DEFAULT_VIEWER_SPLITTER_WIDTH, DEFAULT_CONTROLS_PANEL_WIDTH])
+    else:
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([DEFAULT_VIEWER_SPLITTER_WIDTH, DEFAULT_CONTROLS_PANEL_WIDTH])
 
     central = QtWidgets.QWidget()
     central.setObjectName('appCentral')

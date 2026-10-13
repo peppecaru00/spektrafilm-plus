@@ -172,9 +172,29 @@ def apply_grain(
     profile_type,
     bypass_grain=False,
     use_fast_stats=False,
+    origin_x_um: float = 0.0,
+    origin_y_um: float = 0.0,
+    seed: int | None = None,
 ):
     if not grain.active or bypass_grain:
         return density_cmy
+
+    effective_seed = seed if seed is not None else getattr(grain, "seed", None)
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(density_cmy):
+        from spektrafilm.cuda.grain import cuda_apply_grain
+        return cuda_apply_grain(
+            density_cmy,
+            pixel_size_um=pixel_size_um,
+            grain_params=grain,
+            density_curves=density_curves,
+            density_curves_layers=density_curves_layers,
+            profile_type=profile_type,
+            bypass_grain=bypass_grain,
+            origin_x_um=origin_x_um,
+            origin_y_um=origin_y_um,
+            seed=effective_seed,
+        )
 
     if not grain.sublayers_active:
         density_max = np.nanmax(density_curves, axis=0)

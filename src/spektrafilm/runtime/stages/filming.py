@@ -7,12 +7,13 @@ from spektrafilm.model.color_filters import compute_band_pass_filter
 from spektrafilm.model.diffusion import apply_diffusion_filter_um, apply_gaussian_blur_um, apply_halation_um, boost_highlights
 from spektrafilm.model.develop import compute_density_spectral, develop, develop_simple
 from spektrafilm.utils.autoexposure import measure_autoexposure_ev
-from spektrafilm.utils.spectral_upsampling import rgb_to_raw_hanatos2025, rgb_to_raw_mallett2019
+from spektrafilm.utils.spectral_upsampling import rgb_to_raw, rgb_to_raw_hanatos2025, rgb_to_raw_mallett2019
 
 
 class FilmingStage:
     def __init__(self, film, film_render_params, camera_params, io_params, settings_params,
-                 lut_service, resize_service, enlarger_service, color_reference_service):
+                 lut_service, resize_service, enlarger_service, color_reference_service,
+                 print_render_params=None):
         self._film = film
         self._film_render = film_render_params
         self._camera = camera_params
@@ -21,6 +22,7 @@ class FilmingStage:
         self._lut_service = lut_service
         self._resize_service = resize_service
         self._enlarger_service = enlarger_service
+        self._print_render = print_render_params
         
         # send info for hanatos2025 sensitivity adaptation to LUT service
         hanatos2025_adaptation = self._film.hanatos2025_adaptation()
@@ -66,22 +68,50 @@ class FilmingStage:
         )
         raw = apply_gaussian_blur_um(raw, self._camera.lens_blur_um, self._resize_service.pixel_size_um)
         raw = apply_halation_um(raw, self._film_render.halation, self._resize_service.pixel_size_um)
-        raw *= self._color_reference_service.black_white_filming_exposure_correction()
-        log_raw = np.log10(np.fmax(raw, 0.0) + 1e-10)
+        from spektrafilm.cuda.device import is_cupy_array, to_device, get_array_module
+        bw_filming = self._color_reference_service.black_white_filming_exposure_correction()
+        if is_cupy_array(raw):
+            bw_filming = to_device(bw_filming)
+        raw *= bw_filming
+        xp = get_array_module(raw)
+        log_raw = xp.log10(xp.fmax(raw, 0.0) + 1e-10)
         return log_raw
 
     def develop(self, log_raw: np.ndarray) -> np.ndarray:
+        density_curves = self._film.data.density_curves
+        density_curves_layers = self._film.data.density_curves_layers
+
+        if self._io.scan_film and getattr(self, "_print_render", None) is not None:
+            morph = getattr(self._print_render, "density_curves_morph", None)
+            if (
+                morph is not None
+                and getattr(morph, "active", False)
+                and getattr(self._film.data, "density_curves_model", None) is not None
+                and self._film.data.density_curves_model.n_layers > 0
+            ):
+                from spektrafilm.utils.morph_curves import apply_print_curves_morph, is_morph_identity
+                if not is_morph_identity(morph):
+                    density_curves, density_curves_layers = apply_print_curves_morph(
+                        self._film.data.log_exposure,
+                        self._film.data.density_curves_model,
+                        morph,
+                        profile_type=self._film.info.type,
+                        return_layers=True,
+                    )
+
         return develop(
             log_raw,
             self._resize_service.pixel_size_um,
             self._film.data.log_exposure,
-            self._film.data.density_curves,
-            self._film.data.density_curves_layers,
+            density_curves,
+            density_curves_layers,
             self._film_render.dir_couplers,
             self._film_render.grain,
             self._film.info.type,
             gamma_factor=self._film_render.density_curve_gamma,
             use_fast_stats=self._settings.use_fast_stats,
+            origin_x_um=getattr(self._resize_service, "origin_x_um", 0.0),
+            origin_y_um=getattr(self._resize_service, "origin_y_um", 0.0),
         )
 
     # private methods
@@ -103,8 +133,14 @@ class FilmingStage:
             normalization = np.sum(sensitivity * band_pass_filter * illuminant[:, None], axis=0) / np.sum(sensitivity * illuminant[:, None], axis=0)
             sensitivity *= band_pass_filter / normalization
 
-        if self._settings.rgb_to_raw_method == "hanatos2025":
-            tc_lut = self._lut_service.get_filming_tc_lut(sensitivity)
+        method = self._settings.rgb_to_raw_method
+        if method == "hanatos2025":
+            try:
+                tc_lut = self._lut_service.get_filming_tc_lut(
+                    method, sensitivity, self._film.info.reference_illuminant
+                )
+            except TypeError:
+                tc_lut = self._lut_service.get_filming_tc_lut(sensitivity)
             raw = rgb_to_raw_hanatos2025(
                 rgb,
                 sensitivity,
@@ -113,13 +149,30 @@ class FilmingStage:
                 reference_illuminant=self._film.info.reference_illuminant,
                 tc_lut=tc_lut,
             )
-        elif self._settings.rgb_to_raw_method == "mallett2019":
-            raw = rgb_to_raw_mallett2019(rgb, sensitivity,
-                            color_space=color_space,
-                            apply_cctf_decoding=apply_cctf_decoding,
-                            reference_illuminant=self._film.info.reference_illuminant)
+        elif method == "mallett2019":
+            raw = rgb_to_raw_mallett2019(
+                rgb,
+                sensitivity,
+                color_space=color_space,
+                apply_cctf_decoding=apply_cctf_decoding,
+                reference_illuminant=self._film.info.reference_illuminant,
+            )
         else:
-            raise ValueError(f"Unsupported rgb_to_raw method: {self._settings.rgb_to_raw_method}")
+            try:
+                tc_lut = self._lut_service.get_filming_tc_lut(
+                    method, sensitivity, self._film.info.reference_illuminant
+                )
+            except TypeError:
+                tc_lut = self._lut_service.get_filming_tc_lut(sensitivity)
+            raw = rgb_to_raw(
+                method,
+                rgb,
+                sensitivity,
+                color_space=color_space,
+                apply_cctf_decoding=apply_cctf_decoding,
+                reference_illuminant=self._film.info.reference_illuminant,
+                tc_lut=tc_lut,
+            )
         return raw
     
     def _compute_density_spectral_midgray_to_balance_print(self):

@@ -1,0 +1,803 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=teal,
+    citecolor=teal,
+    urlcolor=teal,
+    pdfauthor={Spektrafilm Core Engine},
+    pdftitle={Spektrafilm Emulsion & Darkroom Print Architecture Manual}
+}
+
+\tcbset{
+    colback=gray!5,
+    colframe=gray!50,
+    boxrule=0.6pt,
+    arc=3pt,
+    left=6pt,
+    right=6pt,
+    top=4pt,
+    bottom=4pt
+}
+
+\titleformat{\section}{\Large\bfseries\color{darkgray}}{\thesection}{1em}{}[\titlerule]
+\titleformat{\subsection}{\large\bfseries\color{darkgray!90}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{darkgray!80}}{\thesubsubsection}{1em}{}
+
+\title{\textbf{\LARGE Spektrafilm Physical Emulsion \& Darkroom Architecture}\\[0.4em]
+\Large Technical Reference Manual \& Comprehensive Parameter Documentation:\\[0.2em]
+\large \textit{Film Emulsion Physics, Grain Microstructure, DIR Couplers, Halation, and Darkroom Print Chemistry}}
+\author{\textbf{Spektrafilm Core Engine Documentation}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document provides a comprehensive mathematical, physical, and operational specification of the photochemical simulation parameters across the \textbf{FILM}, \textbf{GRAIN}, \textbf{PRINT}, and \textbf{ADVANCED} pages in Spektrafilm. Unlike heuristic digital LUTs or additive noise overlays, Spektrafilm simulates the physical anatomy of the complete analog pipeline: forward and back-surface optical halation, Development-Inhibitor-Releasing (DIR) interlayer chemical couplings, Poisson-Binomial silver crystal activation, photographic paper curve morphing across grain-speed strata, ambient viewing glare, darkroom enlarger paper preflashing, optical enlarger diffusion, continuous spectral upsampling across the visible locus (Hanatos 2025), and rigorous input/output gamut compression (ACES RGC, CAM16-UCS, OkLch). For each parameter, we formulate its underlying physics, mathematical role, typical operating domain, and practical photographic manifestations accompanied by descriptive real-world examples.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Architectural Overview of Film \& Darkroom Modeling}
+%=============================================================================
+
+Analog photographic reproduction is a two-stage optical and photochemical transformation: the \textbf{Taking Stage (Film Negative)} and the \textbf{Printing Stage (Photographic Paper)}. Light travels through two distinct optical systems and two separate multi-layer chemical emulsions:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Camera Taking Stage (Film Page):}
+    \begin{itemize}
+        \item \textbf{Camera Diffusion:} Front-of-lens scattering filters (e.g., Black Pro-Mist, Glimmerglass) deflect incoming scene rays, causing highlights to bloom outward into shadows.
+        \item \textbf{In-Emulsion Scatter \& Halation:} Scene light undergoes forward Mie scattering in the turbid emulsion gelatin, passes through the film base, and reflects off the anti-halation back boundary, creating red/amber halos around specular highlights.
+        \item \textbf{Chemical DIR Couplers:} Developing agents reduce exposed silver halide crystals to metallic silver, releasing mobile chemical inhibitor fragments that diffuse laterally (producing micro-acutance edge borders) and vertically across color layers (producing inter-image color saturation).
+        \item \textbf{Stochastic Dye Grain Formation:} Each color record comprises fast, mid, and slow sub-layers. Microscopic dye clouds form stochastically around developed silver crystals.
+    \end{itemize}
+
+    \item \textbf{Darkroom Printing Stage (Print Page):}
+    \begin{itemize}
+        \item \textbf{Enlarger Projection \& Enlarger Diffusion:} The developed negative is illuminated by an enlarger lamp. An optical diffusion filter placed under the enlarger lens scatters light projected through the negative. Because the negative is tonally inverted (shadows are transparent, highlights are opaque), \textbf{shadows bleed into highlights} (reverse bloom / dark halo).
+        \item \textbf{Paper Preflashing:} A faint, uniform burst of light exposed onto the paper overcomes the emulsion's toe inertia, softly compressing harsh highlights and allowing selective highlight color-toning.
+        \item \textbf{Print Paper Chemistry Morphing:} The characteristic response curves of the photographic paper are mathematically morphed across fast sub-layers (highlights) and slow sub-layers (shadows), controlling tonal contrast, developer exhaustion, and split-toning.
+        \item \textbf{Paper Surface Viewing Glare:} When a physical paper print is viewed under ambient room illumination, Fresnel surface reflectance bounces ambient light into the observer's eyes, lifting pure digital black voids to an authentic paper $D_{\max}$ floor and tinting the deep tones with the viewing illuminant.
+    \end{itemize}
+
+    \item \textbf{Color Science \& Pipeline Controls (Advanced Page):}
+    \begin{itemize}
+        \item \textbf{Continuous Spectral Upsampling:} Reconstructs full continuous spectral irradiance distributions ($380 - 730\,\text{nm}$) from discrete RGB scene values using triangular locus coordinates, allowing physical integration against emulsion sensitivity curves.
+        \item \textbf{Input Gamut Compression:} Softly rolls off wide-gamut camera chromaticities toward the visible spectral locus using Reinhard knees, preventing unphysical extrapolation artifacts.
+        \item \textbf{Output Gamut Compression:} Compresses the volumetric envelope of developed CMY dyes into standard display spaces (sRGB, Display P3, Rec.2020) via GPU-accelerated ACES RGC v1.3 or perceptual CAM16-UCS.
+        \item \textbf{Negative Film Gamma Tuning \& Channel Permutation:} Directly modulates the taking film curve contrast before latent chemical development and enables physical layer swaps for experimental cross-processing and false-color trichromes.
+    \end{itemize}
+\end{enumerate}
+
+\begin{tcolorbox}
+\textbf{The Subtractive Color Rule (RGB vs. CMY):}\\
+In Spektrafilm, controls labeled in \textbf{RGB} map directly to the light-sensitive emulsion coats that deposit the complementary \textbf{CMY} subtractive dyes:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Red (R):} Exposes Red-sensitive crystals $\longrightarrow$ Forms \textbf{Cyan} dye (modulates Red transmission).
+    \item \textbf{Green (G):} Exposes Green-sensitive crystals $\longrightarrow$ Forms \textbf{Magenta} dye (modulates Green transmission).
+    \item \textbf{Blue (B):} Exposes Blue-sensitive crystals $\longrightarrow$ Forms \textbf{Yellow} dye (modulates Blue transmission).
+\end{itemize}
+\end{tcolorbox}
+
+\newpage
+
+%=============================================================================
+\section{The Grain Emulation Layer (\texttt{GrainParams})}
+%=============================================================================
+
+Spektrafilm does not overlay an additive noise texture. Grain is modeled as the spatial stochasticity of localized dye clouds created by individual silver halide crystals.
+
+\subsection{Mathematical Foundation}
+For pixel area $A_{\text{px}} = p_{\mu\text{m}}^2$ and effective particle area $A_{\text{particle}}(c, l)$, the average particle packing count per pixel in sublayer $l \in \{\text{fast}, \text{mid}, \text{slow}\}$ and channel $c \in \{R, G, B\}$ is:
+\begin{equation}
+n_{\text{particles}}(c, l) = A_{\text{px}} \cdot \frac{D_{\max}(l, c)}{\sum_k D_{\max}(k, c)} \cdot \frac{1}{A_{\text{particle}}(c, l)}
+\end{equation}
+The probability of crystal activation under local normalized optical density $D$ is:
+\begin{equation}
+P_{\text{dev}} = \mathrm{clip}\left(\frac{D}{D_{\max}}, 10^{-6}, 1 - 10^{-6}\right)
+\end{equation}
+To simulate crystal crowding (emulsion saturation), the saturation attenuation factor $S$ is computed using the channel uniformity $U_c \in [0, 1]$:
+\begin{equation}
+S = 1.0 - P_{\text{dev}} \cdot U_c \cdot (1 - 10^{-6})
+\end{equation}
+For each pixel, the developed particle count $k$ is sampled from a Binomial trial $k \sim \mathrm{Binomial}(n, P_{\text{dev}})$, and the variance-scaled optical density is reconstructed using Nutting's law:
+\begin{equation}
+D_{\text{out}} = D_{\text{mean}} + \left(\frac{k - n P_{\text{dev}}}{\sqrt{n P_{\text{dev}} (1 - P_{\text{dev}})}}\right) \cdot \sqrt{S} \cdot \sigma_D
+\end{equation}
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{grain.particle\_area\_um2} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Base cross-sectional area $a$ of silver halide crystals in square micrometers ($\mu\text{m}^2$).
+    \item \textbf{Typical Range:} $0.05$ to $1.20\,\mu\text{m}^2$ (Default: $0.40\,\mu\text{m}^2$).
+    \item \textbf{Physical Relation to ISO:} Larger crystals intercept more photons, providing higher photographic speed at the expense of increased statistical granularity:
+    \begin{itemize}
+        \item ISO 50 / 100 (Fine grain): $0.08 - 0.15\,\mu\text{m}^2$ (Kodak Ektar, Fuji Velvia).
+        \item ISO 400 (Standard speed): $0.35 - 0.50\,\mu\text{m}^2$ (Kodak Portra 400, Tri-X).
+        \item ISO 800 / 1600 (High speed): $0.70 - 1.20\,\mu\text{m}^2$ (CineStill 800T, Ilford Delta 3200).
+    \end{itemize}
+    \item \textbf{Example:} Set to $0.12$ for architectural landscapes; set to $0.85$ for gritty push-processed street photography.
+\end{itemize}
+
+\subsubsection{\texttt{grain.particle\_scale} (Float Tuple $[R, G, B]$)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Per-color-layer particle area scaling vector $[s_R, s_G, s_B]$. Multiplies \texttt{particle\_area\_um2}.
+    \item \textbf{Typical Range:} $[0.5, 0.5, 0.5]$ to $[2.5, 2.5, 4.0]$ (Default: $[1.6, 1.6, 3.2]$).
+    \item \textbf{Photographic Reason for $[1.6, 1.6, 3.2]$:} In physical color film, the uppermost layer is the \textbf{Blue-sensitive} emulsion. Because silver halide has native sensitivity to blue/UV light, the blue layer historically used larger tabular crystals to achieve adequate speed, while green and red layers used dyed, more uniform crystals. Consequently, authentic film grain shows significantly coarser yellow dye clumping.
+    \item \textbf{Example:}
+    \begin{itemize}
+        \item \textbf{Authentic Kodak Vision3:} $(1.6,\, 1.6,\, 3.2)$ produces chunky blue/yellow grain in daylight skies.
+        \item \textbf{Modern Clean Fine Grain:} $(1.0,\, 1.0,\, 1.2)$ produces uniform, monochromatic-like grain.
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{\texttt{grain.particle\_scale\_layers} (Float Tuple $[\text{fast}, \text{mid}, \text{slow}]$)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Area scaling across the three speed sub-layers $[\ell_{\text{fast}}, \ell_{\text{mid}}, \ell_{\text{slow}}]$.
+    \item \textbf{Typical Range:} $[1.5, 1.0, 0.5]$ (Default: $[2.0, 1.0, 0.5]$).
+    \item \textbf{Photographic Mechanism:}
+    \begin{itemize}
+        \item \textbf{Fast Sub-layer ($\ell_{\text{fast}}$):} Large, highly sensitive crystals. In negative film, they activate at the lowest exposure threshold, establishing the \textbf{toe/shadows}.
+        \item \textbf{Slow Sub-layer ($\ell_{\text{slow}}$):} Small, insensitive crystals that require intense exposure to develop, establishing the \textbf{shoulder/highlights}.
+    \end{itemize}
+    \item \textbf{Example:} Setting $(3.0,\, 1.0,\, 0.3)$ makes deep shadows coarse and organic while keeping bright highlights silky smooth.
+\end{itemize}
+
+\subsubsection{\texttt{grain.density\_min} (Float Tuple $[R, G, B]$)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Internal base density offset added prior to stochastic particle generation and subtracted immediately thereafter.
+    \item \textbf{Typical Range:} $0.02$ to $0.06$ (Default: $(0.03,\, 0.03,\, 0.03)$).
+    \item \textbf{Density-Neutrality Law:} Because \texttt{density\_min} is subtracted out post-grain ($\Delta D = 0$), \textbf{it does not alter image color tint or brightness}. It acts strictly as a grain noise floor, ensuring unexposed clear film base ($D = 0$) maintains subtle silver noise rather than artificial digital smoothness.
+\end{itemize}
+
+\subsubsection{\texttt{grain.uniformity} (Float Tuple $[R, G, B]$)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Crystal spatial packing regularity factor $U_c \in [0.90, 0.99]$ (Default: $[0.98, 0.98, 0.98]$).
+    \item \textbf{Photographic Effect:} Controls grain clumping in dense midtones. Lower values ($0.92$) cause crystals to form irregular dendritic clumps. Higher values ($0.99$) simulate modern T-Grain emulsions.
+\end{itemize}
+
+\subsubsection{\texttt{grain.blur} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Post-grain spatial Gaussian smoothing sigma $\sigma_{\text{px}}$ in pixels.
+    \item \textbf{Typical Range:} $0.5$ to $1.2\,\text{px}$ (Default: $0.8\,\text{px}$).
+    \item \textbf{Photographic Effect:} Simulates the physical optical MTF of scanner optics and the finite boundary diffusion of oxidized color couplers into gelatin.
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{In-Emulsion Scatter \& Optical Halation (\texttt{HalationParams})}
+%=============================================================================
+
+Halation is the red-orange fringe observed around high-contrast specular borders.
+
+\subsection{Physical Mechanism}
+When intense light strikes film:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Emulsion Forward Scatter:} Photons scatter within the turbid emulsion gelatin according to a two-component mixture: a tight Gaussian core (emulsion acutance) and an exponential tail (veiling flare).
+    \item \textbf{Internal Reflection:} Unabsorbed photons traverse the transparent film base ($40 - 80\,\mu\text{m}$ thick). At the base-air back boundary, rays exceeding the critical angle $\theta_c = \arcsin(1/n_{\text{base}}) \approx 41^\circ$ undergo Total Internal Reflection (TIR).
+    \item \textbf{Red Halation Coloration:} The reflected rays travel back into the emulsion from behind. Because the Red-sensitive layer is at the very bottom of the emulsion stack, it receives the strongest back-reflected exposure, producing vivid red/amber halos.
+\end{enumerate}
+
+\subsection{Mathematical Model}
+The total effective irradiance $E_{\text{eff}}$ arriving at the emulsion is modeled as:
+\begin{equation}
+E_{\text{eff}} = (1 - s) \cdot E_0 + s \cdot \left[ (1 - w_s) \cdot \mathcal{G}_{\sigma_c} * E_0 + w_s \cdot \mathcal{E}_{\lambda_t} * E_0 \right] + \sum_{k=1}^N a_k \cdot \left(\mathcal{G}_{\sigma_k} * E_0\right)
+\end{equation}
+where $s$ is the scatter fraction, $w_s$ is the exponential tail weight, and $a_k$ are multi-bounce reflection amplitudes with $\sigma_k = \sigma_1 \sqrt{k}$.
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{halation.active} (Boolean)}
+\begin{itemize}[leftmargin=*]
+    \item Toggles optical scatter and back-reflection halation on/off.
+\end{itemize}
+
+\subsubsection{\texttt{halation.boost\_ev} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Pre-clip dynamic range reconstruction in EV stops ($0.0$ to $4.0$).
+    \item \textbf{Physical Rationale:} Digital sensors clip at $1.0$. Real film has $3-5$ stops of overexposure latitude. \texttt{boost\_ev} mathematically reconstructs the unclipped irradiance of bright sources so they generate physically authentic halo spread.
+    \item \textbf{Example:} Set to $2.5$ for night cinematography featuring exposed neon signs or car headlights.
+\end{itemize}
+
+\subsubsection{\texttt{halation.halation\_strength} (Float Tuple $[R, G, B]$)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Back-reflection amplitude per color coat.
+    \item \textbf{Typical Range:} Red: $0.02 - 0.25$; Green: $0.00 - 0.05$; Blue: $0.00$.
+    \item \textbf{Examples:}
+    \begin{itemize}
+        \item \textbf{Standard Anti-Halation Undercoat (Kodak Portra):} $(0.04,\, 0.01,\, 0.00)$.
+        \item \textbf{Remjet-Stripped Motion Picture Film (CineStill 800T):} $(0.22,\, 0.05,\, 0.00)$ produces iconic crimson halos around practical bulbs.
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{\texttt{halation.halation\_first\_sigma\_um} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Spatial radius $\sigma_1$ of the initial back-reflection ring in micrometers.
+    \item \textbf{Typical Range:} $35.0$ to $85.0\,\mu\text{m}$ (Default: $55.0\,\mu\text{m}$, matching standard 35mm acetate base thickness).
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Chemical Development-Inhibitor-Releasing Couplers (\texttt{DIRCouplerParams})}
+%=============================================================================
+
+Modern color negative films contain DIR couplers that release mobile chemical inhibitors during development, creating edge sharpness and pure color primaries.
+
+\subsection{Mathematical Model}
+For local dye yield $\mathbf{D} = [D_R, D_G, D_B]^T$, chemical inhibition is modeled via matrix coupling:
+\begin{equation}
+\mathbf{D}_{\text{inhibited}} = \mathbf{D} - \alpha \cdot \mathbf{M} \cdot (\mathcal{G}_{\sigma_{\text{DIR}}} * \mathbf{D})
+\end{equation}
+where $\mathbf{M}$ is the $3 \times 3$ inhibition tensor:
+\begin{equation}
+\mathbf{M} = \begin{bmatrix}
+\gamma_{\text{same}, R} & g_{G \to R} & g_{B \to R} \\
+g_{R \to G} & \gamma_{\text{same}, G} & g_{B \to G} \\
+g_{R \to B} & g_{G \to B} & \gamma_{\text{same}, B}
+\end{bmatrix}
+\end{equation}
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{dir\_couplers.inhibition\_samelayer} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Multiplier on diagonal elements of $\mathbf{M}$.
+    \item \textbf{Photographic Effect:} Controls intra-layer chemical edge sharpness. At high-contrast boundaries, inhibitor diffuses into less exposed areas, carving a dark edge band and elevating the boundary contrast.
+    \item \textbf{Example:} Set to $1.4$ for crisp, high-acutance 35mm portraits without digital sharpening halos.
+\end{itemize}
+
+\subsubsection{\texttt{dir\_couplers.inhibition\_interlayer} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Multiplier on off-diagonal cross-layer elements of $\mathbf{M}$.
+    \item \textbf{Photographic Effect:} Governs \textbf{inter-image color purity}. When a saturated red object exposes only the Red layer, inhibitors diffuse into the adjacent Green and Blue layers, suppressing contaminating Magenta and Yellow dye formation.
+    \item \textbf{Example:} Set to $1.6$ for vibrant Fuji Velvia colors; lower to $0.4$ for muted 1970s pastel palettes.
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Camera Optical Diffusion (\texttt{DiffusionFilterParams})}
+%=============================================================================
+
+Mounted directly before the taking lens, camera optical diffusion filters soften digital harshness and bloom bright specular highlights.
+
+\subsection{Mathematical Formulation}
+The Point Spread Function (PSF) is modeled as a normalized multi-scale radial mixture:
+\begin{equation}
+\mathrm{PSF}(r) = w_c \cdot \mathcal{G}_{\lambda_c}(r) + w_h \cdot \mathcal{G}_{\lambda_h}(r) + w_b \cdot \mathcal{G}_{\lambda_b}(r)
+\end{equation}
+subject to $w_c + w_h + w_b = 1$, representing Core, Halo, and Bloom.
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{camera.diffusion\_filter.filter\_family} (Enumeration)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Black Pro-Mist (BPM):} Contains microscopic black particulate specks that absorb a fraction of the deflected light. Blurs highlights while maintaining deep blacks.
+    \item \textbf{Pro-Mist (White):} Pure refraction. Highlights flare aggressively and shadows lift into milky, dreamy low-contrast tones.
+    \item \textbf{Glimmerglass:} Subtle core retention with a crisp sparkle around specular points; preserves clean facial features.
+    \item \textbf{CineBloom:} Smooth, continuous highlight halation with a broad, photographic roll-off.
+\end{itemize}
+
+\subsubsection{\texttt{camera.diffusion\_filter.strength} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item Standard commercial optical density grade ($1/8, 1/4, 1/2, 1, 2$). Maps to the deflected photon fraction $p_s$.
+\end{itemize}
+
+\subsubsection{\texttt{camera.diffusion\_filter.halo\_warmth} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item Chromatic redistribution offset $[-1.5, +1.5]$ along the radial PSF axis. Positive values push warmer wavelengths to the outer halo, producing golden flare rims.
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Darkroom Printing Architecture (\texttt{PrintParams})}
+%=============================================================================
+
+The \textbf{PRINT} page simulates the darkroom enlarger and photographic paper printing process.
+
+\subsection{Photochemical Darkroom Principles: The Negative Inversion}
+In traditional darkroom printing, light passes from the enlarger lamp through the negative onto photographic paper:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Scene Shadows:} In a negative, shadows receive almost no scene light and remain thin, clear film base ($D_{\min}$). Under the enlarger, these clear areas transmit the \textbf{maximum amount of light} onto the paper. On photographic paper, exposure to light creates optical density. Therefore, \textbf{the shadows of the final image correspond to the heavy exposure shoulder ($D_{\max}$) of the photographic paper}.
+    \item \textbf{Scene Highlights:} In a negative, bright highlights form dense metallic silver and dye ($D_{\max}$), blocking enlarger light. The paper receives almost no exposure. Therefore, \textbf{the highlights of the final image correspond to the unexposed toe ($D_{\min}$) of the paper curves}.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\textwidth}{lll}
+\toprule
+\textbf{Image Tone} & \textbf{Film Negative State} & \textbf{Darkroom Print Paper State} \\
+\midrule
+\textbf{Deep Shadows} & Thin, transparent film base ($D_{\min}$) & \textbf{Heavy light exposure $\longrightarrow$ High paper density ($D_{\max}$)} \\
+\textbf{Midtones} & Moderate silver/dye density & Moderate light exposure $\longrightarrow$ Midtone paper density \\
+\textbf{Highlights / Whites} & Dense silver/dye mask ($D_{\max}$) & \textbf{Minimal light exposure $\longrightarrow$ Paper base white ($D_{\min}$)} \\
+\bottomrule
+\end{tabularx}
+\caption{The Negative-to-Paper Inversion Law in Darkroom Printing.}
+\end{table}
+
+\newpage
+
+%=============================================================================
+\section{Print Chemistry \& Emulsion Morphing (\texttt{PrintCurvesMorphParams})}
+%=============================================================================
+
+The \textbf{Chemistry} panel controls how the photographic paper's characteristic response curves ($D-\log E$) are chemically shifted and morphed during development.
+
+\subsection{Mathematical Model}
+Photographic paper emulsion is modeled as three stratified grain-speed populations (fast, mid, and slow sub-layers). The effective gamma $\gamma_{\text{eff}}(c, l)$ is computed multiplicatively:
+\begin{align}
+\gamma_{\text{eff}}(c, \text{fast}) &= \gamma_{\text{global}} \cdot \gamma_{\text{channel}}(c) \cdot \gamma_{\text{fast}} \\
+\gamma_{\text{eff}}(c, \text{slow}) &= \gamma_{\text{global}} \cdot \gamma_{\text{channel}}(c) \cdot \gamma_{\text{slow}}
+\end{align}
+where $c \in \{R, G, B\}$ corresponds to the complementary subtractive dye records (Cyan, Magenta, Yellow). The curve model centers and sigmas are transformed as:
+\begin{equation}
+\sigma_{c, l}' = \max\left(\frac{\sigma_{c, l}}{\gamma_{\text{eff}}(c, l)},\, \sigma_{\text{floor}}\right), \qquad \mu_{c, l}' = \frac{\mu_{c, l}}{\gamma_{\text{eff}}(c, l)}
+\end{equation}
+Developer exhaustion blends the sub-layer CDFs toward a matched Gumbel-max distribution:
+\begin{equation}
+F_{\text{exhausted}}(x) = (1 - \delta) \cdot \Phi(x) + \delta \cdot F_{\text{Gumbel}}(x)
+\end{equation}
+coupled with a midgray centering offset to preserve $D(0)$ across the midtone axis.
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{chemistry.active} (Boolean)}
+\begin{itemize}[leftmargin=*]
+    \item Enables dynamic print density-curve morphing. When unchecked, factory profile curves are used bit-exact.
+\end{itemize}
+
+\subsubsection{\texttt{chemistry.gamma\_factor} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Global coupled contrast multiplier for the photographic paper.
+    \item \textbf{Range:} $0.50$ to $2.00$ (Default: $1.00$).
+    \item \textbf{Photographic Effect:} Simulates changing paper contrast grade (e.g., Grade 1 soft paper vs. Grade 4 high-contrast paper).
+    \item \textbf{Example:} Set to $0.80$ for low-contrast portraits; set to $1.35$ for punchy commercial fashion prints.
+\end{itemize}
+
+\subsubsection{\texttt{chemistry.gamma\_factor\_fast} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Contrast factor applied to the fast grain sub-layer.
+    \item \textbf{Target Tonal Region:} \textbf{Paper Highlights / Whites} (fast crystals react to low exposure thresholds).
+    \item \textbf{Photographic Effect:} Lowering $\gamma_{\text{fast}}$ softens highlight contrast and extends highlight roll-off. Raising $\gamma_{\text{fast}}$ creates crisp, bright whites.
+    \item \textbf{Example:} Set to $0.85$ to retain delicate embroidery detail in a bright white wedding dress.
+\end{itemize}
+
+\subsubsection{\texttt{chemistry.gamma\_factor\_slow} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Contrast factor applied to mid and slow grain sub-layers.
+    \item \textbf{Target Tonal Region:} \textbf{Paper Shadows / Blacks} (slow crystals require intense enlarger exposure to develop).
+    \item \textbf{Photographic Effect:} Controls deep black contrast and shadow separation without altering clean whites.
+    \item \textbf{Example:} Set to $1.25$ for rich, deep pitch-black shadows while preserving smooth midtones.
+\end{itemize}
+
+\subsubsection{\texttt{chemistry.gamma\_factor\_green} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Per-channel gamma multiplier for the Green-sensitive emulsion coat.
+    \item \textbf{Subtractive Dye Target:} \textbf{Magenta Dye Layer} (Magenta dye absorbs Green light).
+    \item \textbf{The Shadow Green Tinting Mechanism:}
+    Because print shadows sit at maximum paper exposure ($D_{\max}$), lowering \texttt{gamma\_factor\_green} ($0.80 - 0.90$) flattens the Magenta dye curve shoulder. Less magenta dye forms in the shadows. With less magenta dye absorbing green light, \textbf{the shadows take on a rich, organic olive/greenish tint}.
+    \item \textbf{Example:} Set to $0.85$ to achieve the vintage cross-processed green-shadow cinematic aesthetic.
+\end{itemize}
+
+\subsubsection{\texttt{chemistry.gamma\_factor\_red} \& \texttt{gamma\_factor\_blue} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{gamma\_factor\_red:} Modulates Cyan dye formation (Cyan absorbs Red). Lowering shifts shadows toward warm red/amber; raising deepens cyan-teal.
+    \item \textbf{gamma\_factor\_blue:} Modulates Yellow dye formation (Yellow absorbs Blue). Lowering shifts shadows toward blue/cool; raising increases yellow density.
+\end{itemize}
+
+\subsubsection{\texttt{chemistry.developer\_exhaustion} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Blends sub-layer profiles toward a Gumbel-max distribution ($0.0$ to $1.0$).
+    \item \textbf{Photographic Effect:} Replicates depleted darkroom developer chemicals where bromides accumulate, softening curve shoulders and creating vintage compression in the deepest tones while midtones remain anchored.
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Paper Viewing Glare (\texttt{GlareParams})}
+%=============================================================================
+
+\subsection{Physical Phenomenon}
+When viewing a physical photographic print in a room, light strikes the print surface. While most light penetrates the gelatin to be modulated by dyes and reflected by the white paper base, a small fraction (Fresnel reflection) bounces directly off the outer glossy/matte surface into the viewer's eyes without passing through the dyes.
+
+\subsection{Mathematical Model}
+Viewing glare adds ambient viewing illuminant light $\mathrm{XYZ}_{\text{illuminant}}$ in linear color space:
+\begin{equation}
+\mathrm{XYZ}_{\text{observed}}(\mathbf{x}) = \mathrm{XYZ}_{\text{print}}(\mathbf{x}) + g(\mathbf{x}) \cdot \mathrm{XYZ}_{\text{illuminant}}
+\end{equation}
+where $g(\mathbf{x})$ is a spatially correlated log-normal random field representing paper micro-texture:
+\begin{equation}
+g(\mathbf{x}) = \frac{1}{100} \cdot \mathcal{G}_{\text{blur}} * \mathrm{LogNormal}\left(\mu = \text{percent},\, \sigma = \text{roughness} \cdot \text{percent}\right)
+\end{equation}
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{glare.active} (Boolean)}
+\begin{itemize}[leftmargin=*]
+    \item Toggles paper surface viewing glare on/off.
+\end{itemize}
+
+\subsubsection{\texttt{glare.percent} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Reflectance percentage of ambient room light ($0.0$ to $1.0$, default $0.15$).
+    \item \textbf{Photographic Effect:} Establishes an authentic \textbf{real-world black floor ($D_{\max}$)}. Digital displays can produce $0.000$ pure black; physical photo prints cannot exceed $\sim 100:1$ to $200:1$ contrast ratio due to surface glare. \texttt{percent} prevents blacks from looking like sterile, bottomless digital voids and tints shadows with the ambient viewing light.
+    \item \textbf{Example:} Set to $0.15 - 0.25$ for an authentic gallery print look; set to $0.0$ for OLED-optimized punchy deep blacks.
+\end{itemize}
+
+\subsubsection{\texttt{glare.roughness} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Specular micro-facet roughness of the paper surface ($0.0$ to $1.0$).
+    \item \textbf{Examples:}
+    \begin{itemize}
+        \item \textbf{Smooth Glossy Paper:} $0.20$ (uniform, mirror-like specular sheen).
+        \item \textbf{Lustre / Pearl / Semi-Matte:} $0.50$ (standard photographic fine-art paper).
+        \item \textbf{Fiber-Based Matte Paper:} $0.85$ (diffuse surface scattering).
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{\texttt{glare.blur} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Spatial smoothing sigma in pixels for surface reflectance variations.
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Darkroom Paper Preflashing (\texttt{EnlargerParams})}
+%=============================================================================
+
+\subsection{Physical Mechanism}
+Preflashing (flashing) is the technique of giving photographic paper a faint, uniform exposure of dim light through the clear film base before or after the main image exposure.
+
+Because light addition is additive ($E_{\text{total}} = E_{\text{negative}} + E_{\text{preflash}}$):
+\begin{itemize}[leftmargin=*]
+    \item \textbf{In Print Shadows:} The paper already receives huge exposure ($E \approx 1000$). Adding $+5$ preflash light ($\Delta = +0.5\%$) is completely invisible. \textbf{Blacks remain dense and deep}.
+    \item \textbf{In Print Highlights:} The paper receives almost zero exposure ($E \approx 2$). Adding $+5$ preflash light triples the exposure, overcoming the paper's inertia threshold.
+    \item \textbf{Result:} Preflashing compresses harsh, blown-out highlights without muddying blacks.
+\end{itemize}
+
+\subsection{Detailed Parameter Reference}
+
+\subsubsection{\texttt{preflash.preflash\_exposure} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Preflash irradiance strength in EV stops ($0.0$ to $0.20$, default $0.0$).
+    \item \textbf{Photographic Effect:} Softens harsh specular highlights and pulls texture back into bridal gowns, bright clouds, and porcelain skin.
+    \item \textbf{Example:} Set to $0.04$ EV to eliminate harsh digital clipping on specular skin reflections.
+\end{itemize}
+
+\subsubsection{\texttt{preflash.preflash\_y\_filter\_shift} \& \texttt{preflash\_m\_filter\_shift} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Enlarger filtration shifts in Kodak Color Compensating (CC) units for the preflash light.
+    \item \textbf{Photographic Effect:} Because preflashing only affects the highlights, these dials provide \textbf{selective highlight color toning}:
+    \begin{itemize}
+        \item \textbf{Warm/Creamy Highlights:} Increase \texttt{preflash\_y\_filter\_shift} ($+10$ to $+20$ CC).
+        \item \textbf{Green/Olive Highlights:} Decrease \texttt{preflash\_m\_filter\_shift} ($-10$ to $-15$ CC).
+    \end{itemize}
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Enlarger Optical Diffusion vs. Camera Film Diffusion}
+%=============================================================================
+
+\subsection{The Negative Inversion Principle}
+Because photographic negatives invert tones, optical diffusion behaves oppositely at the two stages:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\textwidth}{p{3.5cm}p{5.5cm}p{5.5cm}}
+\toprule
+\textbf{Attribute} & \textbf{Film Diffusion (\texttt{FILM} Tab)} & \textbf{Print Diffusion (\texttt{PRINT} Tab)} \\
+\midrule
+\textbf{Physical Position} & On camera taking lens & Under enlarger lens in darkroom \\
+\textbf{Source Light} & Scene illumination & Light projected through negative \\
+\textbf{Bloom Direction} & \textbf{Highlights bloom into shadows} & \textbf{Shadows bleed into highlights} \\
+\textbf{Visual Hallmark} & Halos around streetlights, soft skin & Smoky, velvety dark glow around silhouettes \\
+\textbf{Grain Texture} & \textbf{Pin-sharp}: grain forms after diffusion & \textbf{Softened}: grain is optically blurred \\
+\bottomrule
+\end{tabularx}
+\caption{Comprehensive Comparison: Camera Film Diffusion vs. Darkroom Enlarger Diffusion.}
+\end{table}
+
+\subsection{Detailed Parameter Reference for Enlarger Diffusion}
+
+\subsubsection{\texttt{enlarger.diffusion\_filter.filter\_family} (Enumeration)}
+\begin{itemize}[leftmargin=*]
+    \item \texttt{black\_pro\_mist}: Standard darkroom diffusion with deep shadow contrast retention.
+    \item \texttt{glimmerglass}: Neutral color scatter without warm bias; preserves clean whites.
+    \item \texttt{pro\_mist}: Broad, heavy misting across the entire print plane.
+\end{itemize}
+
+\subsubsection{\texttt{enlarger.diffusion\_filter.halo\_warmth} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Chromatic redistribution offset along the radial PSF axis.
+    \item \textbf{Important Interaction with Print Tinting:}
+    Because light passing through a color negative carries the film's natural \textbf{orange mask}, enlarger diffusion scatters warm light into the white portions of the paper. This exposes the paper's Magenta and Cyan dye layers, which can neutralize delicate green tints in the whites.
+    \item \textbf{Solution:} Set \texttt{halo\_warmth} to a negative value ($-0.5$ to $-1.0$) or switch to \texttt{glimmerglass} to keep highlight tints clean.
+\end{itemize}
+
+\subsubsection{\texttt{enlarger.diffusion\_filter.bloom\_intensity} \& \texttt{spatial\_scale} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item Lowering \texttt{bloom\_intensity} ($0.2 - 0.5$) restricts the smoky shadow glow close to dark edges, preventing it from spilling across wide white backgrounds.
+\end{itemize}
+
+\newpage
+
+%=============================================================================
+\section{Tonal \& Chromatic Calibration Guide}
+%=============================================================================
+
+\subsection{Dialing in Greenish / Olive Shadows}
+\begin{enumerate}[leftmargin=*]
+    \item Go to the \textbf{PRINT} page $\to$ \textbf{Chemistry} panel.
+    \item Ensure \texttt{active} is checked.
+    \item Lower \texttt{gamma\_factor\_green} from $1.0 \longrightarrow 0.82 - 0.88$.
+    \item \textbf{Why this works:} On print paper, Green exposure forms Magenta dye. Lowering green gamma flattens the Magenta curve in the heavy exposure shoulder (the shadows). Less magenta dye is deposited $\longrightarrow$ less green light is absorbed $\longrightarrow$ shadows render distinctly greenish.
+    \item Combine with \texttt{gamma\_factor\_slow} to restrict the effect strictly to the deepest tones.
+\end{enumerate}
+
+\subsection{Why Grain \texttt{density\_min} Does Not Alter Color Tint}
+\begin{itemize}[leftmargin=*]
+    \item In Spektrafilm, \texttt{density\_min} is added before the particle simulation to provide a minimum noise floor and subtracted immediately afterwards:
+    \begin{equation}
+    D_{\text{out}} = \mathrm{simulate\_grain}(D + D_{\min}) - D_{\min}
+    \end{equation}
+    \item It is strictly \textbf{density-neutral} by design. Attempting to use it for color tinting will distort the grain noise floor rather than adjusting tone.
+\end{itemize}
+
+\subsection{Preventing Print Diffusion from Neutralizing Highlight Tints}
+When Print Diffusion is active, warm enlarger light scatters into white highlights, forming unwanted magenta dye that cancels green tints. To avoid this:
+\begin{enumerate}[leftmargin=*]
+    \item Dial \texttt{halo\_warmth} to a negative value ($-0.6$ to $-1.0$) under Enlarger Diffusion.
+    \item Or switch \texttt{filter\_family} to \texttt{glimmerglass}.
+    \item Or lower \texttt{bloom\_intensity} to $0.3$ to keep the shadow diffusion localized.
+\end{enumerate}
+
+\newpage
+
+%=============================================================================
+\section{Advanced Color Science \& Pipeline Control (\texttt{ADVANCED} Tab)}
+%=============================================================================
+
+The \textbf{ADVANCED} page houses the mathematical foundations of the spectral rendering pipeline. It governs how discrete RGB camera inputs are upsampled into continuous visible spectra, how wide-gamut chromaticities are conditioned prior to emulsion exposure, how the developed subtractive dye gamut is mapped into target display spaces, and provides direct low-level control over taking-film gamma and emulsion layer routing.
+
+\subsection{Continuous Spectral Upsampling (\texttt{SpectralUpsamplingSection})}
+
+\subsubsection{Physical Problem \& Mathematical Principle}
+Physical film does not respond to three discrete RGB values; silver halide crystals respond to the continuous spectral power distribution (SPD) of incident light $I(\lambda) \in [380, 730]\,\text{nm}$ weighted by their spectral sensitivities $S_c(\lambda)$:
+\begin{equation}
+E_c = \int_{380\,\text{nm}}^{730\,\text{nm}} I(\lambda) \, S_c(\lambda) \, d\lambda, \qquad c \in \{R, G, B\}
+\end{equation}
+Because camera sensors capture only three tristimulus values, the engine must invert the under-determined problem of reconstructing an infinite-dimensional spectrum from three coordinates (metamerism).
+
+\subsubsection{Hanatos 2025 Architecture}
+The default \texttt{hanatos2025} method operates across the \textbf{entire visible chromaticity locus}, reconstructing continuous smooth reflectance and irradiance distributions from any $(x, y)$ chromaticity.
+To achieve high numerical accuracy without non-physical boundary singularities, chromaticity coordinates are mapped into triangular locus coordinates $(t_x, t_y)$:
+\begin{equation}
+t_x = 1 - \sqrt{x}, \qquad t_y = y \cdot \sqrt{x}
+\end{equation}
+A 4-dimensional precomputed coefficient basis $\mathbf{c}(t_x, t_y) = [c_0, c_1, c_2, c_3]^T$ is interpolated via 2D cubic splines to synthesize the continuous spectrum $I(\lambda)$:
+\begin{equation}
+I(\lambda) = \sum_{k=0}^3 c_k(t_x, t_y) \cdot \phi_k(\lambda)
+\end{equation}
+When \texttt{spectral\_gaussian\_blur} is configured with sigma $\sigma_\lambda$, the synthesized spectrum is smoothed across wavelength:
+\begin{equation}
+I_{\text{smooth}}(\lambda) = I(\lambda) * \frac{1}{\sigma_\lambda \sqrt{2\pi}} \exp\left(-\frac{\lambda^2}{2\sigma_\lambda^2}\right)
+\end{equation}
+eliminating artificial high-frequency spectral spikes.
+
+\subsubsection{Detailed Parameter Reference: Spectral Upsampling}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{\texttt{settings.rgb\_to\_raw\_method} (Enumeration):}
+    \begin{itemize}
+        \item \texttt{hanatos2025} (Default): State-of-the-art spectral recovery operating on the full visible chromaticity locus. Handles wide-gamut inputs (ACEScg, V-Gamut, BT.2020) with physical fidelity.
+        \item \texttt{mallett2019}: Mallett \& Yuksel (2019) spectral primary decomposition. Formulated strictly for the sRGB gamut; out-of-gamut wide-gamut colors will clip before spectral integration.
+    \end{itemize}
+
+    \item \textbf{\texttt{settings.apply\_hanatos2025\_adaptation\_window} (Boolean):}
+    Enables the empirical bandpass windowing function that gently suppresses unphysical ultraviolet ($< 400\,\text{nm}$) and far-red ($> 700\,\text{nm}$) energy lobes in highly saturated chromaticities.
+
+    \item \textbf{\texttt{settings.apply\_hanatos2025\_adaptation\_surface} (Boolean):}
+    Applies the multi-degree surface polynomial adaptation across the $(t_x, t_y)$ locus, ensuring energy conservation and exact colorimetric round-tripping under standard illuminants.
+
+    \item \textbf{\texttt{settings.spectral\_gaussian\_blur} (Float):}
+    Gaussian blur standard deviation $\sigma_\lambda$ in nanometers (default: $0.0\,\text{nm}$).
+    \begin{itemize}
+        \item Range: $0.0$ to $15.0\,\text{nm}$.
+        \item Setting to $2.0 - 5.0\,\text{nm}$ softens artificial spectral discontinuities when processing images illuminated by narrow-band LED or fluorescent discharge lighting.
+    \end{itemize}
+\end{itemize}
+
+\subsection{Input Gamut Compression (\texttt{InputGamutCompressSpec})}
+
+\subsubsection{Physical Problem \& The Out-of-Locus Hazard}
+Modern digital cinema cameras record in ultra-wide color spaces (e.g., Sony S-Gamut3, Panasonic V-Gamut, ARRI Wide Gamut 4, ACES AP0). Due to camera matrixing, saturated specular highlights or monochromatic laser lights can produce coordinate values that lie \textbf{outside the visible spectral locus} (i.e., chromaticities that do not correspond to any physically realizable spectrum). Feeding out-of-locus coordinates into spectral upsampling produces mathematical extrapolation noise and negative spectral energy.
+
+\subsubsection{Mathematical Formulation: The Reinhard Compression Knee}
+Spektrafilm solves this by radially compressing out-of-locus chromaticities toward the visible locus boundary using an always-on, smooth Reinhard knee:
+\begin{equation}
+d' = t + s \cdot \frac{n}{\left(1 + n^p\right)^{1/p}}, \qquad n = \frac{d - t}{s}, \quad s = l - t
+\end{equation}
+where $d$ is the radial distance to the locus boundary from the reference illuminant, $t$ is the threshold, $l$ is the limit, and $p$ is the knee power.
+Under the production default $\mathbf{knee} = (0.0,\, 1.0,\, 6.0)$, threshold $t=0.0$ and limit $l=1.0$, reducing the transformation to:
+\begin{equation}
+d' = \frac{d}{\left(1 + d^6\right)^{1/6}}
+\end{equation}
+This creates an ultra-smooth, full-range asymptotic curve that maps $[0, \infty)$ strictly into $[0, 1)$ without a visible transition threshold kink.
+
+\subsubsection{Detailed Parameter Reference: Input Gamut Compress}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{\texttt{io.input\_gamut\_compress.active} (Boolean):}
+    Enables/disables input locus compression. When disabled, input chromaticities are passed directly to the spectral upsampler.
+    \item \textbf{\texttt{io.input\_gamut\_compress.algorithm} (Enumeration):}
+    \begin{itemize}
+        \item \texttt{xy} (Default): Radial compression in CIE 1931 $(x, y)$ chromaticity from the film reference illuminant toward the visible spectral locus. Hue-preserving, verified smoothest across empirical color sweeps.
+        \item \texttt{oklch}: Chroma reduction along constant lightness $L$ and perceptual hue angle $h$ in Oklch space.
+    \end{itemize}
+    \item \textbf{\texttt{io.input\_gamut\_compress.knee} (Float Tuple $[t, l, p]$):}
+    Reinhard threshold $t \in [0, 1)$, limit $l > 0$, and power $p > 0$. Default $(0.0, 1.0, 6.0)$.
+\end{itemize}
+
+\subsection{Output Gamut Compression (\texttt{OutputGamutCompressSpec})}
+
+\subsubsection{Physical Phenomenon: The Subtractive Dye Solid vs. Display Gamuts}
+In physical printing, developed Cyan, Magenta, and Yellow dyes attenuate light subtractively. The resulting color volume forms a smooth, round-to-hexagonal envelope in 3D color space. When this rich photochemical color volume is transformed into standard display color spaces (sRGB, Rec.709, Display P3), highly saturated colors—such as deep crimson reds, rich foliage greens, and Mediterranean ultramarines—can exceed the $[0, 1]^3$ destination cube.
+Without output compression, downstream displays hard-clip these channels, creating harsh contouring, loss of texture, and catastrophic hue shifts (e.g., saturated reds clipping into bright neon yellow).
+
+\subsubsection{Algorithms \& Performance Characteristics}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{\texttt{aces\_rgc} (ACES Reference Gamut Compression v1.3):}
+    The motion picture industry standard compression model. It measures achromatic distance:
+    \begin{equation}
+    d = \frac{\max(R, G, B) - c}{\max(R, G, B)}
+    \end{equation}
+    and compresses $d$ using the Reinhard knee.
+    \begin{tcolorbox}
+    \textbf{CUDA Acceleration Note:}\\
+    In Spektrafilm, \texttt{aces\_rgc} is implemented as a high-throughput fused CUDA kernel. It executes entirely on the GPU, achieving \textbf{real-time interactive previewing}. It is the recommended algorithm for interactive session editing.
+    \end{tcolorbox}
+
+    \item \textbf{\texttt{cam16ucs} (CIECAM16 Uniform Color Space):}
+    State-of-the-art perceptual appearance model (Li \& Luo 2017). Converts RGB to CAM16-UCS coordinates $(J', a_M', b_M')$ under calibrated viewing conditions ($L_A = 64\,\text{cd/m}^2$, average surround). Normalized polar chroma $C' / C_{\max}(J', h')$ is smoothly compressed along lines of constant perceived hue.
+    \begin{itemize}
+        \item \textbf{Strength:} Eliminates the notorious ``blue hue shift'' of older color spaces (where blues drift purple under compression).
+        \item \textbf{Performance:} CPU-based reference model; best suited for final master rendering.
+    \end{itemize}
+
+    \item \textbf{\texttt{oklch} (OkLab/OkLch Perceptual Chroma Reduction):}
+    Compresses normalized chroma $C / C_{\max}(L, h)$ at constant OkLab lightness $L$ and hue angle $h$. Preserves perceptual brilliance while pulling saturation cleanly into the destination cube.
+
+    \item \textbf{\texttt{off}:}
+    Disables output gamut compression. Out-of-gamut values leak beyond $[0, 1]$ and are clipped downstream. Useful strictly for diagnostic pipeline inspection.
+\end{itemize}
+
+\subsubsection{Detailed Parameter Reference: Output Gamut Compress}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{\texttt{io.output\_gamut\_compress.algorithm} (Enumeration):}
+    Selects compression model: \texttt{aces\_rgc}, \texttt{cam16ucs}, \texttt{oklch}, or \texttt{off}.
+    \item \textbf{\texttt{io.output\_gamut\_compress.knee} (Float Tuple $[t, l, p]$):}
+    Reinhard knee parameters on normalized chroma $C / C_{\max}$. Default $(0.0, 1.0, 6.0)$ maps the gamut boundary smoothly to $1.0$ without hard clipping.
+\end{itemize}
+
+\subsection{Negative Film Contrast Tuning (\texttt{TuneSection})}
+
+\subsubsection{\texttt{film\_render.density\_curve\_gamma} (Float)}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{GUI Label:} \textit{Film gamma factor} (located under the \textbf{Tune} panel).
+    \item \textbf{Description:} Contrast multiplier $\gamma_{\text{film}}$ applied directly to the parametric characteristic response curves ($D-\log E$) of the \textbf{taking film negative}.
+    \item \textbf{Mathematical Transformation:}
+    \begin{equation}
+    \sigma_{\text{film}, c, l}' = \frac{\sigma_{\text{film}, c, l}}{\gamma_{\text{film}}}, \qquad \mu_{\text{film}, c, l}' = \frac{\mu_{\text{film}, c, l}}{\gamma_{\text{film}}}
+    \end{equation}
+    \item \textbf{Fundamental Difference from Print Chemistry Gamma:}
+    \begin{itemize}
+        \item \textbf{Film Gamma (\texttt{Tune} Panel):} Operates on the \textbf{Taking Stage} *before* optical halation, stochastic dye grain, and DIR chemical couplings are simulated. Adjusting film gamma alters the optical density distribution of the negative itself; increasing it intensifies grain clumping and deepens DIR coupler edge acutance.
+        \item \textbf{Print Gamma (\texttt{PRINT} Chemistry):} Operates on the \textbf{Printing Stage} *after* the negative is fixed, simulating darkroom paper contrast grades without altering the negative's grain structure.
+    \end{itemize}
+    \item \textbf{Range:} $0.50$ to $2.00$ (Default: $1.00$).
+    \item \textbf{Photographic Application:} Set to $0.80$ to simulate pull-processing in the camera negative (soft, pastel, lower-contrast base); set to $1.30$ to simulate push-processing (+1 stop development).
+\end{itemize}
+
+\subsection{Emulsion Layer Channel Swapping (\texttt{SpecialSection})}
+
+The \textbf{Special} panel provides direct routing matrix permutations of the multi-layer physical emulsion coats.
+
+\subsubsection{\texttt{special.film\_channel\_swap} (Integer Tuple \texorpdfstring{$[c_R, c_G, c_B]$}{[c_R, c_G, c_B]})}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Permutes the order of light-sensitive emulsion coats in the taking film.
+    \item \textbf{Default:} $(0, 1, 2)$ (Standard Red, Green, Blue sensitive order).
+    \item \textbf{Photographic Applications:}
+    \begin{itemize}
+        \item \textbf{Redscale Simulation $(2, 1, 0)$:}
+        In physical photography, redscale film is loaded backward into the camera so light hits the red-sensitive bottom layer first. Setting $(2, 1, 0)$ routes scene blue light into red emulsion and scene red into yellow dye layers, yielding intense, warm, nostalgic amber-red casts.
+        \item \textbf{False-Color Aerochrome / Trichrome $(1, 0, 2)$ or $(1, 2, 0)$:}
+        Simulates infrared aerial reconnaissance films where green foliage renders vivid crimson pink.
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{\texttt{special.print\_channel\_swap} (Integer Tuple \texorpdfstring{$[c_C, c_M, c_Y]$}{[c_C, c_M, c_Y]})}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Description:} Permutes the Cyan, Magenta, and Yellow dye-forming layers of the photographic paper.
+    \item \textbf{Default:} $(0, 1, 2)$ (Standard Cyan, Magenta, Yellow deposition).
+    \item \textbf{Photographic Application:} Simulates darkroom printing with cross-filtered enlarger dichroic heads or experimental lithographic paper inversions.
+\end{itemize}
+
+\subsection{Compute Precision \& Memory Architecture (\texttt{ComputePrecisionSection})}
+
+Simulating high-resolution captures (such as 24\,MP full-frame negatives at $6000 \times 4000$ pixels) involves multi-wavelength intermediate spectral cubes, Fast Fourier Transforms (cuFFT) for optical diffusion, and volumetric 3D look-up tables. The \textbf{Compute precision} selector directly governs the underlying floating-point format and working memory footprint across the execution pipeline.
+
+\subsubsection{\texttt{settings.precision} (\texttt{"float32"} | \texttt{"float64"})}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{GUI Label:} \textit{Precision} (options: \texttt{float32}, \texttt{float64}; located under \textbf{ADVANCED $\to$ Compute precision}).
+    \item \textbf{Default:} \texttt{float32} (Single Precision, 32-bit IEEE 754).
+    \item \textbf{Memory Allocation Analysis (24\,MP RGB Frame):}
+    \begin{itemize}
+        \item \textbf{Single Precision (\texttt{float32}):} Each 24\,MP 3-channel image occupies:
+        \begin{equation}
+        6000 \times 4000 \times 3 \times 4\,\text{bytes} \approx 288\,\text{MB}
+        \end{equation}
+        Complex Fourier transform buffers for optical enlarger/camera diffusion operate in \texttt{complex64} ($576\,\text{MB}$).
+        \item \textbf{Double Precision (\texttt{float64}):} Each 24\,MP 3-channel image occupies:
+        \begin{equation}
+        6000 \times 4000 \times 3 \times 8\,\text{bytes} \approx 576\,\text{MB}
+        \end{equation}
+        Complex Fourier buffers operate in \texttt{complex128} ($1.15\,\text{GB}$).
+    \end{itemize}
+    \item \textbf{VRAM Pressure and Freeze Prevention:}
+    When processing large images on consumer or workstation GPUs, allocating multiple intermediate double-precision arrays (such as $36$-channel spectral cubes requiring $\approx 6.9\,\text{GB}$) can exhaust available VRAM, causing the operating system to initiate paging and memory swapping across the PCIe bus, resulting in unresponsive GUI freezes. Selecting \texttt{float32} cuts the memory footprint by 50\% across all CUDA kernels (halations, fused spectral integration, 3D LUT sampling, and color transforms), preventing out-of-memory stalls while maintaining numerical accuracy well beyond physical film/paper tolerances (24 bits of mantissa precision vs analog grain noise).
+    \item \textbf{CPU Row-Chunking Optimization:}
+    To prevent system memory exhaustion on CPU execution or when generating 3D LUTs, spectral integration stages automatically process large 2D frames in streaming row chunks ($256$ rows per slice), reducing intermediate RAM demand from over $30\,\text{GB}$ to under $50\,\text{MB}$.
+\end{itemize}
+
+\subsection{Summary Reference: ADVANCED Page Controls}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash\ttfamily\footnotesize}p{4.2cm} >{\raggedright\arraybackslash\footnotesize}p{2.8cm} >{\raggedright\arraybackslash\footnotesize}p{2.2cm} >{\raggedright\arraybackslash\footnotesize}X}
+\toprule
+\textbf{\rmfamily Parameter Path} & \textbf{\rmfamily GUI Name} & \textbf{\rmfamily Default} & \textbf{\rmfamily Photographic / Pipeline Function} \\
+\midrule
+settings.rgb\_to\_raw\_method & Spectral upsampling & \texttt{hanatos2025} & Reconstructs continuous spectra across full visible chromaticity locus. \\
+settings.spectral\_gaussian\_blur & Spectral blur & $0.0\,\text{nm}$ & Blurs synthesized spectra to tame narrow-band LED/fluorescent spike artifacts. \\
+io.input\_gamut\_compress.active & Input compress & True & Enables Reinhard roll-off of out-of-locus wide-gamut camera chromaticities. \\
+io.input\_gamut\_compress.algorithm & Input algorithm & \texttt{xy} & Radial locus compression in CIE 1931 coordinates. \\
+io.output\_gamut\_compress.algorithm & Output algorithm & \texttt{aces\_rgc} & GPU-accelerated ACES RGC v1.3 or perceptual CAM16-UCS. \\
+io.output\_gamut\_compress.knee & Output knee & $(0.0, 1.0, 6.0)$ & Smooth Reinhard roll-off to destination display color space boundary. \\
+settings.precision & Precision & \texttt{float32} & Single precision (cuts RAM/VRAM 50\%, prevents 24\,MP freezes) or \texttt{float64}. \\
+film\_render.density\_curve\_gamma & Film gamma factor & $1.00$ & Negative taking-stage contrast multiplier (pre-halation, pre-grain, pre-DIR). \\
+special.film\_channel\_swap & Film channel swap & $(0, 1, 2)$ & Physical layer permutation for Redscale and false-color Aerochrome simulations. \\
+special.print\_channel\_swap & Print channel swap & $(0, 1, 2)$ & Permutation of darkroom paper CMY subtractive dye layers. \\
+\bottomrule
+\end{tabularx}
+\caption{Parameter Reference for the ADVANCED Color Science \& Pipeline Controls.}
+\end{table}
+
+\end{document}

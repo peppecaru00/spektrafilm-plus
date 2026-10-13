@@ -272,6 +272,11 @@ def test_load_raw_image_uses_pipeline_input_settings_and_builds_preview_stack(mo
         'temperature': 3200.0,
         'tint': 0.85,
         'lens_correction': False,
+        'chroma_denoise': False,
+        'chroma_denoise_strength': 1.0,
+        'raw_exposure_ev': 0.0,
+        'highlight_recovery': 1.0,
+        'highlight_mode': 'reconstruct',
         'output_colorspace': 'Display P3',
         'output_cctf_encoding': True,
         'lens_info_out': {},
@@ -388,6 +393,53 @@ def test_load_raw_image_reports_when_lens_correction_is_not_applied(monkeypatch)
         ('Loading raw...', 0),
         ('Loaded raw, lens correction not applied', 5000),
     ]
+
+
+def test_load_raw_image_updates_load_raw_widget_path(monkeypatch) -> None:
+    viewer = FakeViewer()
+    called_path: list[str] = []
+    load_raw_widget = SimpleNamespace(set_path=lambda p: called_path.append(p))
+    controller = GuiController(viewer=viewer, widgets=SimpleNamespace(load_raw=load_raw_widget))
+    gui_state = make_test_controller_gui_state()
+
+    monkeypatch.setattr(controller_module, 'load_and_process_raw_file', lambda path, **kwargs: np.zeros((2, 2, 3), dtype=np.float32))
+    monkeypatch.setattr(controller_module, 'collect_gui_state', lambda *, widgets: gui_state)
+    monkeypatch.setattr(controller, '_set_or_add_input_stack', lambda img: None)
+    monkeypatch.setattr(controller, '_request_auto_preview_if_enabled', lambda: None)
+    monkeypatch.setattr(controller_module, 'set_status', lambda *args, **kwargs: None)
+
+    controller.load_raw_image('C:/tmp/photo.arw')
+    assert called_path == ['C:/tmp/photo.arw']
+
+
+def test_raw_setting_changed_triggers_reprocess_for_raw_file(monkeypatch) -> None:
+    controller = GuiController(viewer=object(), widgets=SimpleNamespace())
+    controller._current_input_path = 'C:/photos/image.arw'
+    reprocessed: list[str] = []
+    monkeypatch.setattr(controller, 'load_raw_image', lambda path: reprocessed.append(path))
+
+    controller.on_raw_setting_changed()
+    assert reprocessed == ['C:/photos/image.arw']
+
+
+def test_raw_setting_changed_noops_when_not_raw(monkeypatch) -> None:
+    controller = GuiController(viewer=object(), widgets=SimpleNamespace())
+    controller._current_input_path = 'C:/photos/image.jpg'
+    reprocessed: list[str] = []
+    monkeypatch.setattr(controller, 'load_raw_image', lambda path: reprocessed.append(path))
+
+    controller.on_raw_setting_changed()
+    assert reprocessed == []
+
+
+def test_schedule_raw_setting_reprocess_starts_timer(monkeypatch) -> None:
+    controller = GuiController(viewer=object(), widgets=SimpleNamespace())
+    controller._current_input_path = 'C:/photos/image.cr2'
+    timer_started: list[bool] = []
+    monkeypatch.setattr(controller._raw_reprocess_timer, 'start', lambda: timer_started.append(True))
+
+    controller.schedule_raw_setting_reprocess()
+    assert timer_started == [True]
 
 
 def test_apply_profile_defaults_routes_through_selection_digest(monkeypatch) -> None:

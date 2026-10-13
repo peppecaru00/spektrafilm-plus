@@ -219,3 +219,14 @@ def test_write_metadata_without_source_still_writes_overrides(tmp_path):
 
     assert exif["Exif.Image.Software"] == "spektrafilm"
     assert exif["Exif.Photo.ColorSpace"] == "1"
+
+
+def test_save_and_write_metadata_webp(tmp_path):
+    destination_path = tmp_path / "test.webp"
+    save_image_oiio(str(destination_path), np.random.rand(8, 8, 3), color_space="sRGB")
+    write_image_metadata(str(destination_path), saving_color_space="sRGB")
+
+    result = read_image_metadata(str(destination_path))
+    assert result is not None
+    exif = _read_tags(result.exif)
+    assert exif["Exif.Image.Software"] == "spektrafilm"

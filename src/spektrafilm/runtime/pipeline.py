@@ -42,6 +42,9 @@ class SimulationPipeline:
         self.settings = self._params.settings
         self.taps = self._params.taps
 
+        from spektrafilm.cuda.device import resolve_device
+        self.device = resolve_device(getattr(self.settings, "device", "auto"))
+
         self.timings = {}
         self._last_elapsed_time = None
 
@@ -65,6 +68,7 @@ class SimulationPipeline:
             self._resize_service,
             self._enlarger_service,
             self._color_reference_service,
+            print_render_params=self.print_render,
         )
         self._printing_stage = PrintingStage(
             self.film,
@@ -112,12 +116,21 @@ class SimulationPipeline:
         self.timings.clear()
         start = perf_counter()
         try:
-            return run_topology(
+            result = run_topology(
                 self._topology, inject, collect, image,
                 on_fire=self._record_node_timing,
             )
+            from spektrafilm.cuda.device import to_cpu
+            out = to_cpu(result)
+            target_dtype = np.float32 if getattr(self.settings, "precision", "float32") == "float32" else np.float64
+            if hasattr(out, "dtype") and out.dtype != target_dtype:
+                out = out.astype(target_dtype, copy=False)
+            return out
         finally:
             self._last_elapsed_time = perf_counter() - start
+            if self.device == "cuda":
+                from spektrafilm.cuda.device import free_memory
+                free_memory()
 
     def get_timings(self):
         return self.timings
@@ -189,9 +202,19 @@ class SimulationPipeline:
         ]
 
     def _preprocess(self, image):
-        image = np.double(np.array(image)[:, :, 0:3])
+        target_dtype = np.float32 if getattr(self.settings, "precision", "float32") == "float32" else np.float64
+        image = np.asarray(image, dtype=target_dtype)
+        if image.shape[-1] > 3:
+            image = image[..., :3]
+        if getattr(self.io, "chroma_denoise", False):
+            from spektrafilm.utils.chroma_denoise import chroma_denoise
+            strength = getattr(self.io, "chroma_denoise_strength", 1.0)
+            image = chroma_denoise(image, strength=strength)
         image = self._filming_stage.auto_exposure(image)
         image = self._resize_service.crop_and_rescale(image)
+        if self.device == "cuda":
+            from spektrafilm.cuda.device import to_device
+            image = to_device(image)
         return image
 
     def _record_node_timing(self, node: Node, elapsed: float) -> None:

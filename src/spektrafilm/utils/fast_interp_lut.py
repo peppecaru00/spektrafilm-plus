@@ -498,6 +498,11 @@ def apply_lut_3d(lut, image, method='pchip'):
 
     The default is 'pchip'. The requested method directly selects the interpolation path.
     """
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(image):
+        from spektrafilm.cuda.interp import cuda_apply_lut_3d
+        return cuda_apply_lut_3d(lut, image, method=method)
+
     if method == 'mitchell':
         return apply_lut_cubic_3d(lut, image)
     if method == 'pchip':
@@ -559,6 +564,11 @@ def apply_lut_cubic_2d(lut, image):
     Applies a 2D LUT (shape: LxLxC) to an image (shape: HxWxC) using cubic interpolation.
     Here the image channels represent the (x, y) coordinates.
     """
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(image):
+        from spektrafilm.cuda.interp import cuda_apply_lut_cubic_2d
+        return cuda_apply_lut_cubic_2d(lut, image)
+
     visible_size = lut.shape[0]
     if visible_size < 2:
         return _apply_lut_linear_2d(lut, image)

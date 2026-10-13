@@ -302,11 +302,21 @@ def test_connect_controller_signals_wires_all_widget_events() -> None:
         set_output_interpolation_mode=object(),
         refresh_preview_cache=object(),
         request_auto_preview=object(),
+        on_raw_setting_changed=object(),
+        schedule_raw_setting_reprocess=object(),
     )
     original_connect_auto_preview_signals = app_module.connect_auto_preview_signals
     widgets = SimpleNamespace(
         filepicker=SimpleNamespace(load_requested=FakeSignal()),
-        load_raw=SimpleNamespace(load_requested=FakeSignal()),
+        load_raw=SimpleNamespace(
+            load_requested=FakeSignal(),
+            lens_correction=SimpleNamespace(toggled=FakeSignal()),
+            chroma_denoise=SimpleNamespace(toggled=FakeSignal()),
+            white_balance=SimpleNamespace(currentTextChanged=FakeSignal()),
+            temperature=SimpleNamespace(valueChanged=FakeSignal()),
+            tint=SimpleNamespace(valueChanged=FakeSignal()),
+            chroma_denoise_strength=SimpleNamespace(valueChanged=FakeSignal()),
+        ),
         gui_config=SimpleNamespace(
             save_current_as_default_requested=FakeSignal(),
             save_current_to_file_requested=FakeSignal(),
@@ -337,6 +347,13 @@ def test_connect_controller_signals_wires_all_widget_events() -> None:
 
     assert widgets.filepicker.load_requested.connected == [controller.load_input_image]
     assert widgets.load_raw.load_requested.connected == [controller.load_raw_image]
+    # RAW settings changes do not trigger automatic reprocess (only explicit 'reprocess raw' button)
+    assert widgets.load_raw.lens_correction.toggled.connected == []
+    assert widgets.load_raw.chroma_denoise.toggled.connected == []
+    assert widgets.load_raw.white_balance.currentTextChanged.connected == []
+    assert widgets.load_raw.temperature.valueChanged.connected == []
+    assert widgets.load_raw.tint.valueChanged.connected == []
+    assert widgets.load_raw.chroma_denoise_strength.valueChanged.connected == []
     assert widgets.simulation.film_stock.textActivated.connected == [controller.apply_profile_defaults]
     assert widgets.simulation.print_paper.textActivated.connected == [controller.apply_profile_defaults]
     assert widgets.gui_config.save_current_as_default_requested.connected == [controller.save_current_as_default]

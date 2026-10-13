@@ -225,6 +225,7 @@ def connect_auto_preview_signals(controller: GuiController, widgets: WidgetBundl
 def connect_controller_signals(controller: GuiController, widgets: WidgetBundle) -> None:
     widgets.filepicker.load_requested.connect(controller.load_input_image)
     widgets.load_raw.load_requested.connect(controller.load_raw_image)
+
     widgets.simulation.film_stock.textActivated.connect(controller.apply_profile_defaults)
     widgets.simulation.print_paper.textActivated.connect(controller.apply_profile_defaults)
     widgets.gui_config.save_current_as_default_requested.connect(controller.save_current_as_default)
@@ -239,6 +240,45 @@ def connect_controller_signals(controller: GuiController, widgets: WidgetBundle)
     widgets.display.output_interpolation.currentTextChanged.connect(controller.set_output_interpolation_mode)
     widgets.display.update_preview_requested.connect(controller.refresh_preview_cache)
     widgets.display.update_preview_requested.connect(controller.request_auto_preview)
+    gallery = getattr(widgets, 'gallery', None)
+    gallery_model = getattr(widgets, 'gallery_model', None)
+    if gallery is not None and gallery_model is not None:
+        open_folder_req = getattr(gallery, 'open_folder_requested', None)
+        if open_folder_req is not None and hasattr(open_folder_req, 'connect'):
+            open_folder_req.connect(controller.gallery_open_folder)
+        add_files_req = getattr(gallery, 'add_files_requested', None)
+        if add_files_req is not None and hasattr(add_files_req, 'connect'):
+            add_files_req.connect(controller.gallery_add_files)
+        scan_all_req = getattr(gallery, 'scan_all_requested', None)
+        if scan_all_req is not None and hasattr(scan_all_req, 'connect'):
+            scan_all_req.connect(controller.gallery_scan_and_save_all)
+        copy_look_req = getattr(gallery, 'copy_look_requested', None)
+        if copy_look_req is not None and hasattr(copy_look_req, 'connect'):
+            copy_look_req.connect(controller.gallery_copy_look)
+        paste_look_req = getattr(gallery, 'paste_look_requested', None)
+        if paste_look_req is not None and hasattr(paste_look_req, 'connect'):
+            paste_look_req.connect(controller.gallery_paste_look)
+        remove_req = getattr(gallery, 'remove_requested', None)
+        if remove_req is not None and hasattr(remove_req, 'connect'):
+            remove_req.connect(controller.gallery_remove_current_photo)
+        remove_item_req = getattr(gallery, 'remove_item_requested', None)
+        if remove_item_req is not None and hasattr(remove_item_req, 'connect'):
+            remove_item_req.connect(controller.gallery_remove_photo_at)
+        sync_param_req = getattr(gallery, 'sync_param_requested', None)
+        if sync_param_req is not None and hasattr(sync_param_req, 'connect'):
+            sync_param_req.connect(controller.gallery_open_sync_dialog)
+        copy_param_req = getattr(gallery, 'copy_param_requested', None)
+        if copy_param_req is not None and hasattr(copy_param_req, 'connect'):
+            copy_param_req.connect(controller.gallery_copy_single_param)
+        paste_param_req = getattr(gallery, 'paste_param_requested', None)
+        if paste_param_req is not None and hasattr(paste_param_req, 'connect'):
+            paste_param_req.connect(controller.gallery_paste_single_param)
+        convert_dng_req = getattr(gallery, 'convert_dng_requested', None)
+        if convert_dng_req is not None and hasattr(convert_dng_req, 'connect'):
+            convert_dng_req.connect(controller.gallery_convert_to_dng)
+        curr_changed = getattr(gallery_model, 'current_changed', None)
+        if curr_changed is not None and hasattr(curr_changed, 'connect'):
+            curr_changed.connect(controller.on_gallery_current_changed)
     connect_auto_preview_signals(controller, widgets)
 
 
@@ -271,18 +311,98 @@ def build_main_window_for_app(
     controller: GuiController | None = None,
     configure_napari_chrome_fn: Callable[..., None] = configure_napari_chrome,
     build_controls_panel_fn: Callable[[Any, WidgetBundle], Any] = build_controls_panel,
-    build_main_window_fn: Callable[[Any, Any], Any] = build_main_window,
+    build_main_window_fn: Callable[..., Any] = build_main_window,
 ) -> Any:
     configure_napari_chrome_fn(viewer, gray_18_canvas=gray_18_canvas_enabled(widgets))
     controls_panel = build_controls_panel_fn(viewer, widgets)
-    if controller is None:
-        return build_main_window_fn(viewer, controls_panel)
-    return build_main_window_fn(
-        viewer,
-        controls_panel,
-        on_rotate_ccw=controller.rotate_input_image_counterclockwise,
-        on_rotate_cw=controller.rotate_input_image_clockwise,
-    )
+    gallery_widget = getattr(widgets, 'gallery', None)
+    kwargs: dict[str, Any] = {}
+    if gallery_widget is not None:
+        kwargs['gallery_widget'] = gallery_widget
+    if controller is not None:
+        kwargs['on_rotate_ccw'] = controller.rotate_input_image_counterclockwise
+        kwargs['on_rotate_cw'] = controller.rotate_input_image_clockwise
+        if hasattr(controller, 'undo'):
+            kwargs['on_undo'] = controller.undo
+        if hasattr(controller, 'redo'):
+            kwargs['on_redo'] = controller.redo
+
+    try:
+        main_window = build_main_window_fn(viewer, controls_panel, **kwargs)
+    except TypeError:
+        main_window = build_main_window_fn(viewer, controls_panel)
+
+    if controller is not None and hasattr(controller, 'history_manager'):
+        undo_btn = getattr(main_window, 'undo_button', None)
+        redo_btn = getattr(main_window, 'redo_button', None)
+        if undo_btn is not None:
+            controller.history_manager.can_undo_changed.connect(undo_btn.setEnabled)
+            undo_btn.setEnabled(controller.history_manager.can_undo)
+        if redo_btn is not None:
+            controller.history_manager.can_redo_changed.connect(redo_btn.setEnabled)
+            redo_btn.setEnabled(controller.history_manager.can_redo)
+
+    gallery_model = getattr(widgets, 'gallery_model', None)
+    if isinstance(main_window, QtWidgets.QWidget):
+        def _can_handle_history_shortcut() -> bool:
+            app_inst = QtWidgets.QApplication.instance()
+            focused = app_inst.focusWidget() if app_inst is not None else None
+            if isinstance(focused, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
+                return False
+            return True
+
+        if controller is not None and hasattr(controller, 'undo'):
+            def _on_undo():
+                if _can_handle_history_shortcut():
+                    controller.undo()
+
+            def _on_redo():
+                if _can_handle_history_shortcut():
+                    controller.redo()
+
+            undo_sc = QtWidgets.QShortcut(QtGui.QKeySequence.Undo, main_window)
+            undo_sc.activated.connect(_on_undo)
+            undo_sc.activatedAmbiguously.connect(_on_undo)
+
+            redo_sc = QtWidgets.QShortcut(QtGui.QKeySequence.Redo, main_window)
+            redo_sc.activated.connect(_on_redo)
+            redo_sc.activatedAmbiguously.connect(_on_redo)
+
+    if gallery_model is not None and isinstance(main_window, QtWidgets.QWidget):
+        prev_sc = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Left"), main_window)
+        prev_sc.activated.connect(gallery_model.previous_photo)
+        prev_up_sc = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Up"), main_window)
+        prev_up_sc.activated.connect(gallery_model.previous_photo)
+
+        next_sc = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Right"), main_window)
+        next_sc.activated.connect(gallery_model.next_photo)
+        next_down_sc = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Down"), main_window)
+        next_down_sc.activated.connect(gallery_model.next_photo)
+
+        def _on_delete():
+            app_inst = QtWidgets.QApplication.instance()
+            focused = app_inst.focusWidget() if app_inst is not None else None
+            if isinstance(focused, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit, QtWidgets.QAbstractSpinBox)):
+                return
+            if controller is not None:
+                controller.gallery_remove_current_photo()
+            elif gallery_model is not None:
+                if gallery_model.selected_count > 0:
+                    gallery_model.remove_items(list(gallery_model.selected_indices))
+                else:
+                    gallery_model.remove_current_photo()
+
+        del_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Delete), main_window)
+        del_sc.activated.connect(_on_delete)
+
+        if controller is not None:
+            copy_look_sc = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Shift+C"), main_window)
+            copy_look_sc.activated.connect(controller.gallery_copy_look)
+
+            paste_look_sc = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Shift+V"), main_window)
+            paste_look_sc.activated.connect(controller.gallery_paste_look)
+
+    return main_window
 
 
 def create_app() -> GuiApp:

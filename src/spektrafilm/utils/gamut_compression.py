@@ -1214,6 +1214,11 @@ def compress_rgb(
         ``C_max(L, h)`` table. Ignored for ``"aces_rgc"``, which
         operates purely in destination RGB.
     """
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(rgb):
+        from spektrafilm.cuda.gamut_compression import cuda_compress_rgb
+        return cuda_compress_rgb(rgb, spec, output_color_space=output_color_space or "sRGB")
+
     if spec.algorithm == "off":
         return np.asarray(rgb, dtype=float)
     threshold, limit, power = spec.knee

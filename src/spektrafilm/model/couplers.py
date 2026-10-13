@@ -92,13 +92,19 @@ def compute_exposure_correction_dir_couplers(log_raw, density_cmy, density_max,
     Returns:
     numpy.ndarray: The modified raw exposure data after applying the effect of inhibitors.
     """
+    from spektrafilm.cuda.device import is_cupy_array, to_device
+    is_gpu = is_cupy_array(density_cmy)
     if positive:
+        if is_gpu:
+            density_max = to_device(density_max)
         density_silver = density_max - density_cmy
     else:
-        density_silver = np.copy(density_cmy)
+        density_silver = density_cmy.copy()
     density_silver += high_exposure_couplers_shift*density_silver**2
     # density_silver[..., k] generated in donor layer k contributes to receiver m
     # through dir_couplers_matrix[k, m].
+    if is_gpu:
+        dir_couplers_matrix = to_device(dir_couplers_matrix)
     log_raw_correction = contract('ijk, km->ijm', density_silver, dir_couplers_matrix)
     if diffusion_size_pixel>0:
         log_raw_correction = ( (1-diffusion_exp_tail_weight)*fast_gaussian_filter(log_raw_correction, diffusion_size_pixel)

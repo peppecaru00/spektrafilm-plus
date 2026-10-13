@@ -34,10 +34,12 @@ from spektrafilm.utils.gamut_compression import InputGamutCompressSpec, OutputGa
 from spektrafilm.utils.morph_curves import PrintCurvesMorphParams
 from spektrafilm_gui.options import (
     AutoExposureMethods,
+    ComputeDevice,
     DiffusionFilterFamilies,
     InputGamutCompressAlgorithms,
     NapariInterpolationModes,
     OutputGamutCompressAlgorithms,
+    ProcessingPrecision,
     RGBColorSpaces,
     RGBtoRAWMethod,
 )
@@ -382,6 +384,22 @@ CHEMISTRY_MANIFEST = GroupManifest(
             tooltip="Per-channel gamma factor applied to the red channel.",
         ),
         ParamSpec(
+            f"{_CH}.gamma_factor_red_fast",
+            label="Gamma factor red fast",
+            min=0.5,
+            max=2.0,
+            step=0.02,
+            tooltip="Gamma factor applied to the fast sub-layer of the red channel.",
+        ),
+        ParamSpec(
+            f"{_CH}.gamma_factor_red_slow",
+            label="Gamma factor red slow",
+            min=0.5,
+            max=2.0,
+            step=0.02,
+            tooltip="Gamma factor applied to the mid and slow sub-layers of the red channel.",
+        ),
+        ParamSpec(
             f"{_CH}.gamma_factor_green",
             label="Gamma factor green",
             min=0.5,
@@ -390,12 +408,44 @@ CHEMISTRY_MANIFEST = GroupManifest(
             tooltip="Per-channel gamma factor applied to the green channel.",
         ),
         ParamSpec(
+            f"{_CH}.gamma_factor_green_fast",
+            label="Gamma factor green fast",
+            min=0.5,
+            max=2.0,
+            step=0.02,
+            tooltip="Gamma factor applied to the fast sub-layer of the green channel.",
+        ),
+        ParamSpec(
+            f"{_CH}.gamma_factor_green_slow",
+            label="Gamma factor green slow",
+            min=0.5,
+            max=2.0,
+            step=0.02,
+            tooltip="Gamma factor applied to the mid and slow sub-layers of the green channel.",
+        ),
+        ParamSpec(
             f"{_CH}.gamma_factor_blue",
             label="Gamma factor blue",
             min=0.5,
             max=2.0,
             step=0.02,
             tooltip="Per-channel gamma factor applied to the blue channel.",
+        ),
+        ParamSpec(
+            f"{_CH}.gamma_factor_blue_fast",
+            label="Gamma factor blue fast",
+            min=0.5,
+            max=2.0,
+            step=0.02,
+            tooltip="Gamma factor applied to the fast sub-layer of the blue channel.",
+        ),
+        ParamSpec(
+            f"{_CH}.gamma_factor_blue_slow",
+            label="Gamma factor blue slow",
+            min=0.5,
+            max=2.0,
+            step=0.02,
+            tooltip="Gamma factor applied to the mid and slow sub-layers of the blue channel.",
         ),
         ParamSpec(
             f"{_CH}.developer_exhaustion",
@@ -537,7 +587,12 @@ CAMERA_EXPOSURE_BORROWED_FIELDS = (
         min=-100,
         max=100,
         step=0.25,
-        tooltip="Add a bias to the auto-exposure of the camera.",
+        tooltip=(
+            "Adjust camera taking exposure of the negative in EV stops. "
+            "Note: When 'Print auto compensation' is ON below, midtone print brightness "
+            "is kept constant while negative contrast/grain shifts. "
+            "Uncheck 'Print auto compensation' to let camera exposure directly brighten/darken the final print."
+        ),
     ),
 )
 
@@ -634,7 +689,7 @@ OUTPUT_GAMUT_COMPRESS_MANIFEST = GroupManifest(
             f"{_OGC}.algorithm",
             tier="basic",
             enum=OutputGamutCompressAlgorithms,
-            tooltip="off: disable output gamut compression. cam16ucs (default): CAM16-UCS chroma reduction with the smoothest constant-hue behavior. oklch: perceptual chroma reduction in OkLab, preserves hue + lightness. aces_rgc: per-channel ACES RGC v1.3, matches Resolve/Nuke/OCIO. oklrab/jzazbz: alternative perceptual spaces.",
+            tooltip="aces_rgc: ACES RGC v1.3 motion picture standard (real-time GPU accelerated). cam16ucs (default): CAM16-UCS perceptual appearance model (CPU, high fidelity). oklch: OkLab chroma reduction. off: disable output gamut compression.",
         ),
         ParamSpec(
             f"{_OGC}.knee",
@@ -687,7 +742,7 @@ SPECTRAL_PANEL_FIELDS = (
         "settings.rgb_to_raw_method",
         label="Spectral upsampling",
         enum=RGBtoRAWMethod,
-        tooltip="Method to upsample the spectral resolution of the image, hanatos2025 works on the full visible locus, mallett2019 works only on sRGB (will clip input).",
+        tooltip="Method to upsample the spectral resolution of the image: arctic2026beta04 (reflectance, laser-like rims), hanatos2025 (irradiance), or mallett2019 (sRGB only).",
     ),
     ParamSpec(
         "settings.apply_hanatos2025_adaptation_window",
@@ -708,9 +763,18 @@ SPECTRAL_PANEL_FIELDS = (
     ),
 )
 
+PRECISION_PANEL_FIELDS = (
+    ParamSpec(
+        "settings.precision",
+        label="Precision",
+        enum=ProcessingPrecision,
+        tooltip="Floating-point precision for image processing: 'float32' (recommended) cuts memory usage by 50% and dramatically speeds up GPU processing; 'float64' uses 64-bit double precision.",
+    ),
+)
+
 # All input_image fields in declaration order; the persistence (de)serializer
 # derives its field↔group mapping from these paths, so the binding lives once.
-INPUT_IMAGE_FIELDS = INPUT_PANEL_FIELDS + CROP_PANEL_FIELDS + SPECTRAL_PANEL_FIELDS
+INPUT_IMAGE_FIELDS = INPUT_PANEL_FIELDS + CROP_PANEL_FIELDS + SPECTRAL_PANEL_FIELDS + PRECISION_PANEL_FIELDS
 
 
 SPECIAL_PANEL_FIELDS = (
@@ -764,6 +828,12 @@ DISPLAY_PANEL_FIELDS = (
         step=0.01,
     ),
     ParamSpec(
+        "settings.device",
+        label="Compute device",
+        enum=ComputeDevice,
+        tooltip="Processing device: 'auto' uses NVIDIA CUDA GPU if available; 'cuda' forces GPU; 'cpu' forces multi-core CPU.",
+    ),
+    ParamSpec(
         "settings.preview_max_size",
         label="Preview max size",
         tooltip="max size of the long edge of the preview image in pixels",
@@ -799,13 +869,21 @@ SIMULATION_EXPOSURE_PANEL_FIELDS = (
         "enlarger.print_exposure_compensation",
         name="print_exposure_compensation",
         label="Print auto compensation",
-        tooltip="Auto adjust the print exposure for the camera exposure compensation ev",
+        tooltip=(
+            "Automatically adjust enlarger exposure to compensate for camera EV shifts, "
+            "keeping print midtone brightness constant. Uncheck to allow camera exposure compensation "
+            "to directly brighten or darken the final print."
+        ),
     ),
     ParamSpec(
         "enlarger.print_exposure",
         name="print_exposure",
         label="Print exposure",
-        tooltip="Changes the exposure time set in the virtual enlarger",
+        tooltip=(
+            "Exposure time of the photographic paper under the enlarger lamp. "
+            "In analog printing, paper turns dark with light: increasing this darkens the print, "
+            "decreasing it lightens the print."
+        ),
         min=0,
         step=0.02,
     ),

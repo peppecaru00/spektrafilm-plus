@@ -47,6 +47,11 @@ class LoadRawState:
     temperature: float
     tint: float
     lens_correction: bool
+    chroma_denoise: bool = False
+    chroma_denoise_strength: float = 1.0
+    raw_exposure_ev: float = 0.0
+    highlight_recovery: float = 1.0
+    highlight_mode: str = "reconstruct"
 
 
 @dataclass(slots=True)
@@ -170,7 +175,12 @@ def normalize_simulation_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 def normalize_display_dict(data: dict[str, Any]) -> dict[str, Any]:
     if 'settings' in data:
-        return dict(data)
+        norm = dict(data)
+        settings = dict(norm.get('settings', {}))
+        if 'device' not in settings:
+            settings['device'] = PROJECT_DEFAULT_GUI_STATE.gui_only.display.settings.device
+        norm['settings'] = settings
+        return norm
     return {
         'use_display_transform': data.get('use_display_transform', PROJECT_DEFAULT_GUI_STATE.gui_only.display.use_display_transform),
         'gray_18_canvas': data.get('gray_18_canvas', PROJECT_DEFAULT_GUI_STATE.gui_only.display.gray_18_canvas),
@@ -178,6 +188,7 @@ def normalize_display_dict(data: dict[str, Any]) -> dict[str, Any]:
         'output_interpolation': data.get('output_interpolation', PROJECT_DEFAULT_GUI_STATE.gui_only.display.output_interpolation),
         'settings': {
             'preview_max_size': data.get('preview_max_size', PROJECT_DEFAULT_GUI_STATE.gui_only.display.settings.preview_max_size),
+            'device': data.get('device', PROJECT_DEFAULT_GUI_STATE.gui_only.display.settings.device),
         },
     }
 
@@ -325,13 +336,21 @@ def gui_state_from_params(
                 temperature=5500.0,
                 tint=1.0,
                 lens_correction=False,
+                chroma_denoise=False,
+                chroma_denoise_strength=1.0,
+                raw_exposure_ev=0.0,
+                highlight_recovery=1.0,
+                highlight_mode='reconstruct',
             ),
             display=DisplayState(
                 use_display_transform=True,
                 gray_18_canvas=True,
                 output_interpolation='spline36',
                 white_padding=0.03,
-                settings=SettingsParams(preview_max_size=params.settings.preview_max_size),
+                settings=SettingsParams(
+                    preview_max_size=params.settings.preview_max_size,
+                    device=params.settings.device,
+                ),
             ),
         ),
     )
@@ -345,7 +364,10 @@ def digest_after_selection(params: RuntimePhotoParams) -> RuntimePhotoParams:
 
 def build_default_gui_state(*, film_stock: str, print_paper: str) -> GuiState:
     params = digest_after_selection(init_params(film_profile=film_stock, print_profile=print_paper))
-    return gui_state_from_params(params, film_stock=film_stock, print_paper=print_paper)
+    state = gui_state_from_params(params, film_stock=film_stock, print_paper=print_paper)
+    if hasattr(state, 'output_gamut_compress'):
+        state.output_gamut_compress = OutputGamutCompressSpec(algorithm='aces_rgc')
+    return state
 
 
 DEFAULT_FILM_STOCK = FilmStocks.kodak_gold_200.value

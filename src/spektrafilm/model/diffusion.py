@@ -49,11 +49,17 @@ def apply_halation_um(raw, halation, pixel_size_um):
     w_s = np.asarray(halation.scatter_tail_weight, dtype=np.float64)
     sigma_c_px = np.asarray(halation.scatter_core_um, dtype=np.float64) * s_scale / pixel_size_um
     lambda_t_px = np.asarray(halation.scatter_tail_um, dtype=np.float64) * s_scale / pixel_size_um
+    from spektrafilm.cuda.device import is_cupy_array, to_device
+    is_gpu = is_cupy_array(raw)
+    if is_gpu:
+        w_s = to_device(w_s)
     if s_amount > 0 and (np.any(sigma_c_px > 0) or np.any(lambda_t_px > 0)):
         core = fast_gaussian_filter(raw, np.maximum(sigma_c_px, 1e-6))
         tail = fast_exponential_filter(raw, np.maximum(lambda_t_px, 1e-6))
         scattered = (1.0 - w_s) * core + w_s * tail
+        del core, tail
         raw = (1.0 - s_amount) * raw + s_amount * scattered
+        del scattered
 
     # 2. Halation pass — additive multi-bounce sum scaled by halation_amount:
     #    E2 = E1 + halation_amount * Σ_{k=1..N} a_k * G(sigma_h * sqrt(k)) * E1
@@ -68,11 +74,18 @@ def apply_halation_um(raw, halation, pixel_size_um):
     if N >= 1 and np.any(a_tot > 0) and np.any(sigma_h_px > 0):
         decay = np.array([rho ** (k - 1) for k in range(1, N + 1)], dtype=np.float64)
         decay /= decay.sum()
-        halation_blur = np.zeros_like(raw)
+        from spektrafilm.cuda.device import get_array_module
+        xp = get_array_module(raw)
+        halation_blur = xp.zeros_like(raw)
         for k, wk in zip(range(1, N + 1), decay):
             sigma_k_px = np.maximum(sigma_h_px * np.sqrt(k), 1e-6)
-            halation_blur += wk * fast_gaussian_filter(raw, sigma_k_px)
+            blurred = fast_gaussian_filter(raw, sigma_k_px)
+            halation_blur += wk * blurred
+            del blurred
+        if is_gpu:
+            a_tot = to_device(a_tot)
         raw = raw + a_tot * halation_blur
+        del halation_blur
         if halation.halation_renormalize:
             raw = raw / (1.0 + a_tot)
 
@@ -595,6 +608,12 @@ def apply_diffusion_filter_um(image, diffusion_filter, pixel_size_um):
         return image
     if diffusion_filter.strength <= 0 or diffusion_filter.spatial_scale <= 0:
         return image
+
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(image):
+        from spektrafilm.cuda.filters import cuda_apply_diffusion_filter_um
+        return cuda_apply_diffusion_filter_um(image, diffusion_filter, pixel_size_um)
+
     family = diffusion_filter.filter_family
     if family not in _DIFFUSION_FILTER_SHAPES:
         raise ValueError(f"Unknown diffusion filter family: {family!r}; "

@@ -3,6 +3,10 @@ import colour
 
 
 def _luminance_y(image, color_space, apply_cctf_decoding):
+    cs = colour.RGB_COLOURSPACES.get(color_space)
+    if cs is not None and getattr(cs, 'cctf_decoding', None) is not None:
+        lin_rgb = cs.cctf_decoding(image) if apply_cctf_decoding else image
+        return np.dot(lin_rgb, cs.matrix_RGB_to_XYZ[1])
     image_XYZ = colour.RGB_to_XYZ(image, color_space, apply_cctf_decoding=apply_cctf_decoding)
     return image_XYZ[:, :, 1]
 

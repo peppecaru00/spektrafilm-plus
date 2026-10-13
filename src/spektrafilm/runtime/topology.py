@@ -72,7 +72,7 @@ def run_topology(
     record per-node timings.
     """
     state: dict[str, Any] = {inject: image}
-    for node in topology:
+    for i, node in enumerate(topology):
         if all(k in state for k in node.reads):
             t0 = perf_counter()
             node.fire(state)
@@ -81,6 +81,19 @@ def run_topology(
                 on_fire(node, elapsed)
             if collect in state:
                 return state[collect]
+
+            # Dead-tap pruning: immediately delete any tap no longer needed by future nodes
+            remaining_nodes = topology[i + 1:]
+            future_reads = set().union(*(n.reads for n in remaining_nodes))
+            pruned = False
+            for k in list(state.keys()):
+                if k != collect and k not in future_reads:
+                    del state[k]
+                    pruned = True
+            if pruned:
+                from spektrafilm.cuda.device import is_cuda_available, free_memory
+                if is_cuda_available():
+                    free_memory()
     raise RuntimeError(
         f"no node path reaches tap {collect!r} from {inject!r}"
     )

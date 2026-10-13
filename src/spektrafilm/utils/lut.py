@@ -41,7 +41,13 @@ def compute_with_lut(data, function, xmin=(0.0, 0.0, 0.0), xmax=(1.0, 1.0, 1.0),
         raise ValueError('xmax must be greater than xmin')
     if lut is None:
         lut = _create_lut_3d(function, xmin, xmax, steps)
-    data_normalized = (data - xmin) / (xmax - xmin)
+    from spektrafilm.cuda.device import is_cupy_array, to_device
+    if is_cupy_array(data):
+        xmin_dev = to_device(xmin)
+        xmax_dev = to_device(xmax)
+        data_normalized = (data - xmin_dev) / (xmax_dev - xmin_dev)
+    else:
+        data_normalized = (data - xmin) / (xmax - xmin)
     return apply_lut_3d(lut, data_normalized), lut
 
 def warmup_luts():

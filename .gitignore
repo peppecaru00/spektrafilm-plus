@@ -16,6 +16,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+dist_installer/
+packaging/
 downloads/
 eggs/
 .eggs/
@@ -190,3 +192,6 @@ uv.lock
 
 # claude
 .claude
+
+# docs build
+spektrafilm_docs.pdf

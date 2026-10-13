@@ -268,6 +268,10 @@ def fast_gaussian_filter(image, sigma, truncate=3.0):
     IIR (Young-van Vliet) for sigma >= 3. Pass truncate=4.0 for the
     SciPy-equivalent FIR kernel width on the small-sigma path.
     """
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(image):
+        from spektrafilm.cuda.filters import cuda_gaussian_filter
+        return cuda_gaussian_filter(image, sigma, truncate=truncate)
     return _apply_per_channel(image, sigma, truncate, _dispatch_2d)
 
 
@@ -321,6 +325,11 @@ def fast_exponential_filter(image, decay_constant, *, n_gaussians=3, truncate=3.
     n_gaussians selects the Gaussian-mixture fidelity: 2 is the fast path,
     3 gives a visibly smoother tail at the cost of one extra blur pass.
     """
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(image):
+        from spektrafilm.cuda.filters import cuda_exponential_filter
+        return cuda_exponential_filter(image, decay_constant, n_gaussians=n_gaussians, truncate=truncate)
+
     if n_gaussians not in _EXPONENTIAL_GAUSSIAN_FITS:
         raise ValueError(
             f"No hardcoded fit for n_gaussians={n_gaussians}; "

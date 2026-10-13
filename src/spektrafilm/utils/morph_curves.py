@@ -53,7 +53,7 @@ from scipy.stats import norm as _norm_dist
 from spektrafilm.profiles.io import DensityCurvesModel
 
 
-__all__ = ["PrintCurvesMorphParams", "apply_print_curves_morph"]
+__all__ = ["PrintCurvesMorphParams", "apply_print_curves_morph", "is_morph_identity"]
 
 
 SIGMA_FLOOR = 0.05  # matches NormCdfsFitConfig.sigma_floor in profile-creator
@@ -70,8 +70,14 @@ class PrintCurvesMorphParams:
     gamma_factor_fast: float = 1.0
     gamma_factor_slow: float = 1.0
     gamma_factor_red: float = 1.0
+    gamma_factor_red_fast: float = 1.0
+    gamma_factor_red_slow: float = 1.0
     gamma_factor_green: float = 1.0
+    gamma_factor_green_fast: float = 1.0
+    gamma_factor_green_slow: float = 1.0
     gamma_factor_blue: float = 1.0
+    gamma_factor_blue_fast: float = 1.0
+    gamma_factor_blue_slow: float = 1.0
     developer_exhaustion: float = 0.0
 
 
@@ -97,6 +103,7 @@ def _evaluate_channel_density(
     sigmas_c,
     profile_type,
     gumbel_mix_per_layer=None,
+    return_layers: bool = False,
 ):
     x = np.asarray(log_exposure, dtype=float)
     centers_c = np.asarray(centers_c, dtype=float)
@@ -105,18 +112,39 @@ def _evaluate_channel_density(
     if gumbel_mix_per_layer is None:
         gumbel_mix_per_layer = np.zeros(centers_c.size, dtype=float)
 
-    total = np.zeros(x.size, dtype=float)
-    for i in range(centers_c.size):
-        z = (x - centers_c[i]) / sigmas_c[i]
-        total += amplitudes_c[i] * _layer_cdf(z, profile_type, float(gumbel_mix_per_layer[i]))
-    return total
+    if return_layers:
+        layers = np.empty((x.size, centers_c.size), dtype=float)
+        for i in range(centers_c.size):
+            z = (x - centers_c[i]) / sigmas_c[i]
+            layers[:, i] = amplitudes_c[i] * _layer_cdf(z, profile_type, float(gumbel_mix_per_layer[i]))
+        return np.sum(layers, axis=1), layers
+    else:
+        total = np.zeros(x.size, dtype=float)
+        for i in range(centers_c.size):
+            z = (x - centers_c[i]) / sigmas_c[i]
+            total += amplitudes_c[i] * _layer_cdf(z, profile_type, float(gumbel_mix_per_layer[i]))
+        return total
 
 
-def _evaluate_fitted_density(log_exposure, density_curves_model, profile_type):
+def _evaluate_fitted_density(log_exposure, density_curves_model, profile_type, return_layers: bool = False):
     log_exposure = np.asarray(log_exposure, dtype=float)
     model = density_curves_model
     n_channels = model.centers.shape[0]
     fitted = np.empty((log_exposure.size, n_channels), dtype=float)
+    if return_layers:
+        fitted_layers = np.empty((log_exposure.size, model.n_layers, n_channels), dtype=float)
+        for channel_idx in range(n_channels):
+            tot, lyr = _evaluate_channel_density(
+                log_exposure,
+                model.centers[channel_idx],
+                model.amplitudes[channel_idx],
+                model.sigmas[channel_idx],
+                profile_type,
+                return_layers=True,
+            )
+            fitted[:, channel_idx] = tot
+            fitted_layers[:, :, channel_idx] = lyr
+        return fitted, fitted_layers
 
     for channel_idx in range(n_channels):
         fitted[:, channel_idx] = _evaluate_channel_density(
@@ -147,6 +175,30 @@ def _channel_gamma_factor(params, channel_idx):
         dtype=float,
     )
     return float(channel_gamma_factors[channel_idx])
+
+
+def _channel_gamma_factor_fast(params, channel_idx):
+    factors = np.array(
+        [
+            float(params.gamma_factor_red_fast),
+            float(params.gamma_factor_green_fast),
+            float(params.gamma_factor_blue_fast),
+        ],
+        dtype=float,
+    )
+    return float(factors[channel_idx])
+
+
+def _channel_gamma_factor_slow(params, channel_idx):
+    factors = np.array(
+        [
+            float(params.gamma_factor_red_slow),
+            float(params.gamma_factor_green_slow),
+            float(params.gamma_factor_blue_slow),
+        ],
+        dtype=float,
+    )
+    return float(factors[channel_idx])
 
 
 def _developer_exhaustion_center_offset(
@@ -213,9 +265,11 @@ def _morph_channel_params(density_curves_model, params, channel_idx, profile_typ
 
     gamma_factor = float(params.gamma_factor)
     channel_gamma_factor = _channel_gamma_factor(params, channel_idx)
-    g_fast = gamma_factor * channel_gamma_factor * float(params.gamma_factor_fast)
-    g_mid = gamma_factor * channel_gamma_factor * float(params.gamma_factor_slow)
-    g_slow = gamma_factor * channel_gamma_factor * float(params.gamma_factor_slow)
+    ch_fast = _channel_gamma_factor_fast(params, channel_idx)
+    ch_slow = _channel_gamma_factor_slow(params, channel_idx)
+    g_fast = gamma_factor * channel_gamma_factor * float(params.gamma_factor_fast) * ch_fast
+    g_mid = gamma_factor * channel_gamma_factor * float(params.gamma_factor_slow) * ch_slow
+    g_slow = gamma_factor * channel_gamma_factor * float(params.gamma_factor_slow) * ch_slow
 
     if g_fast <= 0.0 or g_mid <= 0.0 or g_slow <= 0.0:
         raise ValueError(
@@ -242,16 +296,36 @@ def _morph_channel_params(density_curves_model, params, channel_idx, profile_typ
     return centers_c, amplitudes_c, sigmas_c, gumbel_mix_per_layer
 
 
+def is_morph_identity(params: PrintCurvesMorphParams) -> bool:
+    """Return True if morph parameters represent the identity transformation."""
+    return (
+        abs(float(params.gamma_factor) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_fast) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_slow) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_red) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_red_fast) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_red_slow) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_green) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_green_fast) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_green_slow) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_blue) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_blue_fast) - 1.0) < 1e-6
+        and abs(float(params.gamma_factor_blue_slow) - 1.0) < 1e-6
+        and abs(float(params.developer_exhaustion)) < 1e-6
+    )
+
+
 def apply_print_curves_morph(
     log_exposure,
     density_curves_model: DensityCurvesModel,
     morph_params,
     *,
     profile_type="positive",
+    return_layers: bool = False,
 ):
     """Apply the s023 coupled gamma morph from explicit print-curve inputs."""
     if not morph_params.active:
-        return _evaluate_fitted_density(log_exposure, density_curves_model, profile_type)
+        return _evaluate_fitted_density(log_exposure, density_curves_model, profile_type, return_layers=return_layers)
 
     model = density_curves_model
     if model.n_layers == 0:
@@ -262,8 +336,14 @@ def apply_print_curves_morph(
         ("gamma_factor_fast", morph_params.gamma_factor_fast),
         ("gamma_factor_slow", morph_params.gamma_factor_slow),
         ("gamma_factor_red", morph_params.gamma_factor_red),
+        ("gamma_factor_red_fast", morph_params.gamma_factor_red_fast),
+        ("gamma_factor_red_slow", morph_params.gamma_factor_red_slow),
         ("gamma_factor_green", morph_params.gamma_factor_green),
+        ("gamma_factor_green_fast", morph_params.gamma_factor_green_fast),
+        ("gamma_factor_green_slow", morph_params.gamma_factor_green_slow),
         ("gamma_factor_blue", morph_params.gamma_factor_blue),
+        ("gamma_factor_blue_fast", morph_params.gamma_factor_blue_fast),
+        ("gamma_factor_blue_slow", morph_params.gamma_factor_blue_slow),
     ]:
         if value <= 0.0:
             raise ValueError(f"{gamma_name} must be strictly positive (got {value}).")
@@ -276,6 +356,8 @@ def apply_print_curves_morph(
     log_exposure = np.asarray(log_exposure, dtype=float)
     n_channels = model.centers.shape[0]
     morphed = np.empty((log_exposure.size, n_channels), dtype=float)
+    if return_layers:
+        morphed_layers = np.empty((log_exposure.size, model.n_layers, n_channels), dtype=float)
 
     for channel_idx in range(n_channels):
         centers_c, amplitudes_c, sigmas_c, gumbel_mix_per_layer = _morph_channel_params(
@@ -284,13 +366,28 @@ def apply_print_curves_morph(
             channel_idx,
             profile_type,
         )
-        morphed[:, channel_idx] = _evaluate_channel_density(
-            log_exposure,
-            centers_c,
-            amplitudes_c,
-            sigmas_c,
-            profile_type,
-            gumbel_mix_per_layer=gumbel_mix_per_layer,
-        )
+        if return_layers:
+            tot, lyr = _evaluate_channel_density(
+                log_exposure,
+                centers_c,
+                amplitudes_c,
+                sigmas_c,
+                profile_type,
+                gumbel_mix_per_layer=gumbel_mix_per_layer,
+                return_layers=True,
+            )
+            morphed[:, channel_idx] = tot
+            morphed_layers[:, :, channel_idx] = lyr
+        else:
+            morphed[:, channel_idx] = _evaluate_channel_density(
+                log_exposure,
+                centers_c,
+                amplitudes_c,
+                sigmas_c,
+                profile_type,
+                gumbel_mix_per_layer=gumbel_mix_per_layer,
+            )
 
+    if return_layers:
+        return morphed, morphed_layers
     return morphed

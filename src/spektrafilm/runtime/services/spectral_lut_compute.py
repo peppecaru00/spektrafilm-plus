@@ -1,13 +1,64 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 import numpy as np
 
 from spektrafilm.profiles.io import Hanatos2025SensitivityAdaptation
 from spektrafilm.utils.gamut_compression import InputGamutCompressSpec
 from spektrafilm.utils.lut import compute_with_lut
-from spektrafilm.utils.spectral_upsampling import compute_hanatos2025_tc_lut
+from spektrafilm.utils.spectral_upsampling import compute_hanatos2025_tc_lut, compute_tc_lut, lut_descriptor
 from spektrafilm.utils.timings import timeit
+
+
+def _key_equal(a, b) -> bool:
+    """Structural equality for cache keys: tuples that may hold ndarrays, nested
+    tuples, strings, frozen specs, or None."""
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        return np.array_equal(a, b)
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        return len(a) == len(b) and all(_key_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _key_snapshot(part):
+    """Deep-copy the mutable (ndarray) parts of a key so a later in-place
+    mutation of a caller's array can't silently match a stale cache."""
+    if isinstance(part, np.ndarray):
+        return np.array(part, copy=True)
+    if isinstance(part, tuple):
+        return tuple(_key_snapshot(p) for p in part)
+    return part
+
+
+@dataclass
+class _MemoLUT:
+    lut: np.ndarray | None = None
+    _key: tuple | None = None
+
+    def invalidate(self) -> None:
+        self.lut = None
+        self._key = None
+
+    def get(self, key: tuple, compute: Callable[[], np.ndarray]) -> np.ndarray:
+        if self.lut is not None and self._key is not None and _key_equal(self._key, key):
+            return self.lut
+        self.lut = compute()
+        self._key = _key_snapshot(key)
+        return self.lut
+
+
+def _adaptation_key(adaptation: Hanatos2025SensitivityAdaptation | None) -> tuple:
+    if adaptation is None:
+        return ()
+    return (
+        bool(adaptation.apply_window),
+        bool(adaptation.apply_surface),
+        float(adaptation.spectral_gaussian_blur),
+        adaptation.reference_illuminant,
+        np.asarray(adaptation.window_params) if adaptation.window_params is not None else None,
+        np.asarray(adaptation.surface_params) if adaptation.surface_params is not None else None,
+    )
 
 
 class SpectralLUTService:
@@ -20,6 +71,9 @@ class SpectralLUTService:
         # params.io.input_gamut_compress). Drives the build-time bake
         # of the filming tc_lut; changes invalidate the cache below.
         self.input_gamut_compress: InputGamutCompressSpec = InputGamutCompressSpec()
+
+        # One memo per rgb_to_raw method (lazily created, keyed by identifier)
+        self._tc_lut_memos: dict[str, _MemoLUT] = {}
 
         # external memory
         self.filming_tc_lut_memory : np.ndarray | None = None # tc_lut memory
@@ -43,6 +97,8 @@ class SpectralLUTService:
             self.filming_tc_lut_memory = None
             self._film_sensitivity = None
             self._cached_filming_adaptation = None
+            if 'hanatos2025' in self._tc_lut_memos:
+                self._tc_lut_memos['hanatos2025'].invalidate()
 
     def set_input_gamut_compress(self, spec: InputGamutCompressSpec) -> None:
         """Set the input-gamut-compression spec used when baking the
@@ -55,6 +111,7 @@ class SpectralLUTService:
             self._film_sensitivity = None
             self._cached_filming_adaptation = None
             self._cached_input_gamut_compress = None
+            self._tc_lut_memos.clear()
 
     @staticmethod
     def _copy_hanatos2025_adaptation(
@@ -164,24 +221,42 @@ class SpectralLUTService:
             raise RuntimeError('LUT computation did not produce an output')
         return data_out
 
-    @timeit("get_filming_tc_lut")
-    def get_filming_tc_lut(self, sensitivity):
-        sensitivity = np.asarray(sensitivity)
-        if (
-            self.filming_tc_lut_memory is not None
-            and self._film_sensitivity is not None
-            and self._same_hanatos2025_adaptation(self._cached_filming_adaptation, self.hanatos2025_adaptation)
-            and self._cached_input_gamut_compress == self.input_gamut_compress
-            and np.array_equal(self._film_sensitivity, sensitivity)
-        ):
-            return self.filming_tc_lut_memory
+    def _tc_lut_memo(self, method: str) -> _MemoLUT:
+        memo = self._tc_lut_memos.get(method)
+        if memo is None:
+            memo = self._tc_lut_memos[method] = _MemoLUT()
+        return memo
 
-        self._film_sensitivity = np.array(sensitivity, copy=True)
+    @timeit("get_filming_tc_lut")
+    def get_filming_tc_lut(self, method_or_sensitivity, sensitivity=None, reference_illuminant=None):
+        """tc_lut for any rgb_to_raw `method`, dispatched on its descriptor kind and
+        memoized per method. REFLECTANCE methods relight under the film reference
+        illuminant; IRRADIANCE methods integrate directly."""
+        if isinstance(method_or_sensitivity, str):
+            method = method_or_sensitivity
+            sens = np.asarray(sensitivity)
+            ref_illu = reference_illuminant or 'D55'
+        else:
+            method = "hanatos2025"
+            sens = np.asarray(method_or_sensitivity)
+            ref_illu = getattr(self.hanatos2025_adaptation, 'reference_illuminant', 'D55') if self.hanatos2025_adaptation else 'D55'
+
+        descriptor = lut_descriptor(method)
+        if descriptor.get('kind') == 'irradiance':
+            adaptation = self.hanatos2025_adaptation
+            key = (method, sens, _adaptation_key(adaptation), self.input_gamut_compress)
+            compute = lambda: compute_hanatos2025_tc_lut(
+                sens, adaptation, gamut_compress=self.input_gamut_compress)
+        else:
+            scene_illuminant = descriptor.get('reflectance', {}).get('scene_illuminant', 'D65')
+            key = (method, sens, ref_illu, scene_illuminant, self.input_gamut_compress)
+            compute = lambda: compute_tc_lut(
+                method, sens, ref_illu, gamut_compress=self.input_gamut_compress)
+
+        result = self._tc_lut_memo(method).get(key, compute)
+        self.filming_tc_lut_memory = result
+        self._film_sensitivity = sens
         self._cached_filming_adaptation = self._copy_hanatos2025_adaptation(self.hanatos2025_adaptation)
         self._cached_input_gamut_compress = self.input_gamut_compress
-        self.filming_tc_lut_memory = compute_hanatos2025_tc_lut(
-            sensitivity,
-            self.hanatos2025_adaptation,
-            gamut_compress=self.input_gamut_compress,
-        )
-        return self.filming_tc_lut_memory
+        return result
+

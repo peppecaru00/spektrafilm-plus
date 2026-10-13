@@ -207,6 +207,62 @@ def test_load_raw_section_reprocess_button_uses_selected_path(monkeypatch) -> No
     assert section.reprocess_button.isEnabled() is False
 
 
+def test_load_raw_section_updates_wb_from_actual_photo_values(monkeypatch, tmp_path) -> None:
+    section, _emitted = _make_load_raw_section()
+    raw_file = tmp_path / "test_photo.cr2"
+    raw_file.write_bytes(b"\x00" * 50)
+
+    monkeypatch.setattr(widgets_module, "read_raw_white_balance", lambda path: (5150.0, 1.08))
+
+    # Initial state before setting path
+    assert section.white_balance.value == 'as_shot'
+
+    # Calling set_path should extract and set actual photo WB
+    section.set_path(str(raw_file))
+    assert section.temperature.value == 5150.0
+    assert section.tint.value == 1.08
+
+    # Changing WB mode to daylight sets 5500 / 1.0
+    section.white_balance.value = 'daylight'
+    assert section.temperature.value == 5500.0
+    assert section.tint.value == 1.0
+
+    # Changing WB mode to tungsten sets 3200 / 1.0
+    section.white_balance.value = 'tungsten'
+    assert section.temperature.value == 3200.0
+    assert section.tint.value == 1.0
+
+    # Switching back to as_shot restores photo WB
+    section.white_balance.value = 'as_shot'
+    assert section.temperature.value == 5150.0
+    assert section.tint.value == 1.08
+
+    # Switching to custom keeps current values (allowing editing starting from photo WB)
+    section.white_balance.value = 'custom'
+    assert section.temperature.value == 5150.0
+    assert section.tint.value == 1.08
+
+    # When in custom mode, set_path does not overwrite custom settings
+    section.temperature.value = 4200.0
+    section.tint.value = 0.95
+    section.set_path(str(raw_file))
+    assert section.temperature.value == 4200.0
+    assert section.tint.value == 0.95
+
+    # set_state with as_shot should apply detected photo WB
+    from spektrafilm_gui.state import LoadRawState
+    state = LoadRawState(
+        white_balance='as_shot',
+        temperature=5500.0,
+        tint=1.0,
+        lens_correction=False,
+    )
+    section.set_state(state)
+    assert section.temperature.value == 5150.0
+    assert section.tint.value == 1.08
+
+
+
 def test_file_picker_choose_file_updates_path_and_emits_selected_file(monkeypatch) -> None:
     section, created_buttons = _make_filepicker_section(monkeypatch)
     monkeypatch.setattr(
@@ -335,6 +391,7 @@ def test_numeric_field_specs_define_minimum_and_step() -> None:
         'use_display_transform': bool,
         'gray_18_canvas': bool,
         'white_padding': float,
+        'device': str,
         'preview_max_size': int,
         'output_interpolation': str,
     }
@@ -513,3 +570,23 @@ def test_simulation_section_profile_use_badges_follow_selected_profiles() -> Non
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_portra_400') == 'still / kodak_portra_400'
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_vision3_50d') == 'cine / kodak_vision3_50d'
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_2393') == 'cine / kodak_2393'
+
+
+def test_simulation_section_save_menu_formats_and_signals() -> None:
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from qtpy import QtWidgets
+
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = widgets_module.SimulationSection()
+
+    assert section.save_button.menu() is section.save_menu
+    actions = section.save_menu.actions()
+    action_texts = [a.text() for a in actions]
+    assert action_texts == ['TIF (.tif)', 'PNG (.png)', 'JPG (.jpg)', 'WEBP (.webp)']
+
+    emitted = []
+    section.save_requested.connect(lambda fmt: emitted.append(fmt))
+
+    for idx, expected_fmt in enumerate(['tif', 'png', 'jpg', 'webp']):
+        actions[idx].trigger()
+        assert emitted[-1] == expected_fmt

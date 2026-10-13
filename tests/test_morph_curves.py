@@ -52,3 +52,56 @@ def test_developer_exhaustion_preserves_midgray_at_loge_zero(profile_type):
     )
 
     assert np.allclose(exhausted, baseline, atol=1e-10)
+
+
+def test_morph_curves_rgb_fast_slow():
+    model = DensityCurvesModel(
+        centers=np.array(
+            [
+                [-1.2, -0.2, 0.8],
+                [-1.1, -0.1, 0.9],
+                [-1.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        amplitudes=np.array(
+            [
+                [0.25, 0.35, 0.30],
+                [0.22, 0.34, 0.33],
+                [0.20, 0.32, 0.36],
+            ],
+            dtype=float,
+        ),
+        sigmas=np.array(
+            [
+                [0.30, 0.25, 0.35],
+                [0.28, 0.24, 0.34],
+                [0.26, 0.23, 0.33],
+            ],
+            dtype=float,
+        ),
+    )
+    log_exposure = np.linspace(-1.5, 1.5, 30)
+
+    from spektrafilm.utils.morph_curves import is_morph_identity
+
+    default_params = PrintCurvesMorphParams()
+    assert is_morph_identity(default_params) is True
+
+    # Changing red fast breaks identity
+    r_fast_params = PrintCurvesMorphParams(gamma_factor_red_fast=1.2)
+    assert is_morph_identity(r_fast_params) is False
+
+    # Changing blue slow breaks identity
+    b_slow_params = PrintCurvesMorphParams(gamma_factor_blue_slow=0.8)
+    assert is_morph_identity(b_slow_params) is False
+
+    # Morphing with red fast affects red channel while leaving green and blue identical to baseline
+    baseline = apply_print_curves_morph(log_exposure, model, default_params)
+    morphed_r = apply_print_curves_morph(log_exposure, model, r_fast_params)
+
+    # Channel 0 (red) should differ
+    assert not np.allclose(morphed_r[:, 0], baseline[:, 0])
+    # Channels 1 and 2 (green, blue) should be untouched
+    assert np.allclose(morphed_r[:, 1], baseline[:, 1], atol=1e-10)
+    assert np.allclose(morphed_r[:, 2], baseline[:, 2], atol=1e-10)

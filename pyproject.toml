@@ -49,6 +49,9 @@ dev = [
     "pytest",
     "opencolorio~=2.5",   # PyOpenColorIO; validates emitted config.ocio files
 ]
+cuda = [
+    "cupy-cuda12x>=13.0",
+]
 
 [project.scripts]
 spektrafilm = "spektrafilm_gui.app:main"

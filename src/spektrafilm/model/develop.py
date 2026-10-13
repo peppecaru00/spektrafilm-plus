@@ -21,6 +21,10 @@ def compute_density_spectral(
     density_cmy,
     base_density=None,
 ):
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(density_cmy):
+        from spektrafilm.cuda.spectral import cuda_compute_density_spectral
+        return cuda_compute_density_spectral(channel_density, density_cmy, base_density)
     density_spectral = contract('ijk, lk->ijl', density_cmy, np.asarray(channel_density))
     if base_density is not None:
         density_spectral += np.asarray(base_density)
@@ -50,6 +54,8 @@ def develop(
     gamma_factor: float = 1.0,
     bypass_grain: bool = False,
     use_fast_stats: bool = False,
+    origin_x_um: float = 0.0,
+    origin_y_um: float = 0.0,
 ) -> FloatArray:
     density_curves = np.asarray(density_curves)
     normalized_density_curves = density_curves - np.nanmin(density_curves, axis=0)
@@ -79,6 +85,8 @@ def develop(
         profile_type,
         bypass_grain=bypass_grain,
         use_fast_stats=use_fast_stats,
+        origin_x_um=origin_x_um,
+        origin_y_um=origin_y_um,
     )
 
 def develop_print_morph(

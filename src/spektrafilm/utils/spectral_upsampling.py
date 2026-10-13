@@ -2,10 +2,16 @@ import numpy as np
 import struct
 import colour
 import scipy
+import functools
 import importlib.resources
 from opt_einsum import contract
 import scipy.interpolate
 import scipy.special
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 from spektrafilm.profiles.io import Hanatos2025SensitivityAdaptation
 from spektrafilm.utils.fast_interp_lut import apply_lut_cubic_2d
@@ -130,19 +136,22 @@ def _rgb_to_tc_b(rgb, color_space='ITU-R BT.2020', apply_cctf_decoding=False, re
     # CIECAM16 and the spektrafilm output-side CAM16-UCS algorithm use
     # internally, so the input chromaticity projection stays in the
     # same adaptation family as the output gamut compression.
+    from spektrafilm.cuda.device import is_cupy_array
+    if is_cupy_array(rgb):
+        from spektrafilm.cuda.color import cuda_rgb_to_tc_b
+        return cuda_rgb_to_tc_b(
+            rgb,
+            colourspace=color_space,
+            apply_cctf_decoding=apply_cctf_decoding,
+            reference_illuminant_xy=tuple(illu_xy),
+        )
+
     xyz = colour.RGB_to_XYZ(rgb, colourspace=color_space,
                             apply_cctf_decoding=apply_cctf_decoding,
                             illuminant=illu_xy,
                             chromatic_adaptation_transform='CAT16')
     b = np.sum(xyz, axis=-1)
     xy = xyz[...,0:2] / np.fmax(b[...,None], 1e-10)
-    # Previously: xy = np.clip(xy, 0, 1). Removed because the input gamut
-    # compression baked into the tc_lut at build time (see
-    # gamut_compression.remap_tc_lut_for_compression) now handles OOG
-    # chromaticities correctly via the LUT itself. _tri2quad below already
-    # clamps each output component to [0, 1] for the (rare) inputs that
-    # also fall outside the lower xy triangle, so the LUT lookup
-    # coordinates remain in-bounds.
     tc = _tri2quad(xy)
     b = np.nan_to_num(b)
     return tc, b
@@ -315,9 +324,13 @@ def rgb_to_raw_mallett2019(RGB, sensitivity,
     raw : ndarray
         Raw sensor response.
     """
+    from spektrafilm.cuda.device import is_cupy_array, to_cpu, to_device
+    is_gpu = is_cupy_array(RGB)
+    cpu_rgb = to_cpu(RGB) if is_gpu else RGB
+
     illuminant = standard_illuminant(reference_illuminant)[:]
     basis_set_with_illuminant = np.array(MALLETT2019_BASIS[:])*np.array(illuminant)[:, None]
-    lrgb = colour.RGB_to_RGB(RGB, color_space, 'sRGB',
+    lrgb = colour.RGB_to_RGB(cpu_rgb, color_space, 'sRGB',
                     apply_cctf_decoding=apply_cctf_decoding,
                     apply_cctf_encoding=False)
     raw  = contract('ijk,lk,lm->ijm', lrgb, basis_set_with_illuminant, sensitivity)
@@ -325,7 +338,10 @@ def rgb_to_raw_mallett2019(RGB, sensitivity,
     raw = np.ascontiguousarray(raw)
     
     raw_midgray  = np.einsum('k,km->m', illuminant*0.184, sensitivity) # use 0.184 as midgray reference
-    return raw / raw_midgray[1] # normalize with green channel
+    res = raw / raw_midgray[1] # normalize with green channel
+    if is_gpu:
+        return to_device(res)
+    return res
 
 ################################################################################
 # Using hanatos irradiance spectra generation
@@ -418,8 +434,149 @@ def rgb_to_smooth_spectrum(rgb, color_space, apply_cctf_decoding, reference_illu
     return spectrum_w.flatten()
 
 
+################################################################################
+# Generic reflectance-LUT registry – identifier-driven loading + usage
+
+_LUT_DATA_PACKAGE = 'spektrafilm.data.luts.spectral_upsampling'
+
+
+@functools.lru_cache(maxsize=1)
+def _lut_registry():
+    """{identifier: descriptor} parsed from every `*.toml` sidecar in the LUT data
+    folder. Cached once per process (shipped data does not change at runtime)."""
+    registry = {}
+    for entry in importlib.resources.files(_LUT_DATA_PACKAGE).iterdir():
+        if entry.name.endswith('.toml'):
+            with entry.open('rb') as file:
+                descriptor = tomllib.load(file)
+            registry[descriptor['identifier']] = descriptor
+    # Alias hanatos2026 to arctic2026beta04 if present
+    if 'arctic2026beta04' in registry and 'hanatos2026' not in registry:
+        registry['hanatos2026'] = registry['arctic2026beta04']
+    return registry
+
+
+def available_lut_identifiers(kind=None):
+    """Sorted identifiers of shipped LUTs, optionally filtered to a `kind`
+    ('reflectance' | 'irradiance')."""
+    registry = _lut_registry()
+    return sorted(i for i, d in registry.items() if kind is None or d.get('kind') == kind)
+
+
+def lut_descriptor(identifier):
+    """Descriptor dict (parsed `.toml` sidecar) for `identifier`. Raises KeyError if
+    no LUT with that identifier is shipped."""
+    registry = _lut_registry()
+    if identifier not in registry:
+        raise KeyError(f"no spectral-upsampling LUT {identifier!r}; "
+                       f"available: {sorted(registry)}")
+    return registry[identifier]
+
+
+_LUT_SPECTRA_CACHE = {}
+
+
+def get_lut_spectra(identifier):
+    """Lazy-load + cache the (S, S, bands) spectra array for `identifier` from the `.npy`
+    its descriptor points at. Lazy so a fresh checkout missing the `.npy` does
+    not fail at import; the array loads on first use."""
+    if identifier not in _LUT_SPECTRA_CACHE:
+        descriptor = lut_descriptor(identifier)
+        path = importlib.resources.files(_LUT_DATA_PACKAGE).joinpath(descriptor['file'])
+        with path.open('rb') as file:
+            _LUT_SPECTRA_CACHE[identifier] = np.double(np.load(file))
+    return _LUT_SPECTRA_CACHE[identifier]
+
+
+def compute_reflectance_tc_lut(identifier, sensitivity, reference_illuminant,
+                               spectra_lut=None, gamut_compress=None):
+    """(S, S, C) raw LUT for any REFLECTANCE-family method, selected by `identifier`
+    (C = 3 for colour film, 1 for a black-and-white emulsion).
+
+    Relight the reflectance by the film reference illuminant, integrate against the film
+    sensitivity, self-normalize PER CHANNEL on the method's own emitted neutral (so a neutral
+    surface -> gray (1,1,1) raw, matching the white-balance convention the hanatos2025 window
+    preserves), and optionally bake input gamut compression."""
+    descriptor = lut_descriptor(identifier)
+    if descriptor.get('kind') != 'reflectance':
+        raise ValueError(f"{identifier!r} is kind={descriptor.get('kind')!r}, not "
+                         f"'reflectance' (cannot relight a non-reflectance LUT)")
+    if spectra_lut is None:
+        spectra_lut = get_lut_spectra(identifier)
+    E_ref = standard_illuminant(reference_illuminant)[:]
+    relit = spectra_lut * E_ref[None, None, :]
+    raw_lut = contract('ijl,lm->ijm', relit, sensitivity)
+
+    scene_illuminant = descriptor['reflectance']['scene_illuminant']
+    white_tc = _tri2quad(_illuminant_to_xy(scene_illuminant))
+    neutral_refl = apply_lut_cubic_2d(spectra_lut, np.asarray(white_tc).reshape(1, 1, 2))[0, 0]
+    raw_neutral = np.einsum('l,lm->m', neutral_refl * E_ref, sensitivity)
+    raw_lut = raw_lut / raw_neutral
+
+    if gamut_compress is not None and gamut_compress.active:
+        from spektrafilm.utils.gamut_compression import remap_tc_lut_for_compression
+        scene_xy = _illuminant_to_xy(scene_illuminant)
+        raw_lut = remap_tc_lut_for_compression(raw_lut, scene_xy, gamut_compress)
+
+    return raw_lut
+
+
+def rgb_to_raw_reflectance(identifier, rgb, sensitivity, color_space,
+                           apply_cctf_decoding, reference_illuminant,
+                           tc_lut=None, scene_illuminant=None):
+    """Runtime path for any REFLECTANCE-family method, selected by `identifier`."""
+    descriptor = lut_descriptor(identifier)
+    if scene_illuminant is None:
+        scene_illuminant = descriptor['reflectance']['scene_illuminant']
+    tc_raw, b = _rgb_to_tc_b(
+        rgb,
+        color_space=color_space,
+        apply_cctf_decoding=apply_cctf_decoding,
+        reference_illuminant=scene_illuminant,
+    )
+    if tc_lut is None:
+        tc_lut = compute_reflectance_tc_lut(identifier, sensitivity, reference_illuminant)
+    raw = apply_lut_cubic_2d(tc_lut, tc_raw)
+    raw *= b[..., None]
+    return raw
+
+
+def compute_tc_lut(method, sensitivity, reference_illuminant=None,
+                   spectra_lut=None, gamut_compress=None, hanatos2025_adaptation=None):
+    """Build the (S, S, 3) raw tc_lut for any shipped `method`, dispatched on its
+    descriptor `kind`. REFLECTANCE methods relight + integrate (need reference_illuminant);
+    the IRRADIANCE method integrates directly with optional sensitivity adaptation."""
+    kind = lut_descriptor(method).get('kind')
+    if kind == 'reflectance':
+        return compute_reflectance_tc_lut(method, sensitivity, reference_illuminant,
+                                          spectra_lut=spectra_lut, gamut_compress=gamut_compress)
+    if kind == 'irradiance':
+        adaptation = (hanatos2025_adaptation if hanatos2025_adaptation is not None
+                      else HANATOS2025_NO_ADAPTATION)
+        return compute_hanatos2025_tc_lut(sensitivity, adaptation, gamut_compress=gamut_compress)
+    raise ValueError(f"method {method!r} has unsupported LUT kind {kind!r}")
+
+
+def rgb_to_raw(method, rgb, sensitivity, color_space, apply_cctf_decoding,
+               reference_illuminant, tc_lut=None, scene_illuminant=None):
+    """Convert RGB to film raw for any shipped `method`, dispatched on its descriptor
+    `kind`. REFLECTANCE methods project under the scene illuminant and sample the relit
+    tc_lut; the IRRADIANCE method (hanatos2025) samples its irradiance tc_lut directly."""
+    kind = lut_descriptor(method).get('kind')
+    if kind == 'reflectance':
+        return rgb_to_raw_reflectance(method, rgb, sensitivity, color_space,
+                                      apply_cctf_decoding, reference_illuminant,
+                                      tc_lut=tc_lut, scene_illuminant=scene_illuminant)
+    if kind == 'irradiance':
+        return rgb_to_raw_hanatos2025(rgb, sensitivity, color_space=color_space,
+                                      apply_cctf_decoding=apply_cctf_decoding,
+                                      reference_illuminant=reference_illuminant, tc_lut=tc_lut)
+    raise ValueError(f"method {method!r} has unsupported LUT kind {kind!r}")
+
+
 if __name__=='__main__':
     lut_coeffs = _load_coeffs_lut()
     coeffs = _fetch_coeffs(np.array([[1,1]]) ,lut_coeffs)
     spectra = _compute_spectra_from_coeffs(coeffs)
     lut_spectra = compute_lut_spectra(lut_size=128)
+

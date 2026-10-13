@@ -438,3 +438,75 @@ def test_sync_display_transform_availability_unchecks_when_profile_missing(monke
 
     assert available is False
     assert toggle.checked is False
+
+
+@pytest.mark.parametrize(
+    'output_format,expected_ext,expected_filter_prefix',
+    [
+        ('tif', '.tif', 'TIFF Image (*.tif *.tiff)'),
+        ('png', '.png', 'PNG Image (*.png)'),
+        ('jpg', '.jpg', 'JPEG Image (*.jpg *.jpeg)'),
+        ('webp', '.webp', 'WebP Image (*.webp)'),
+    ],
+)
+def test_save_output_layer_format_selection(
+    monkeypatch,
+    output_format: str,
+    expected_ext: str,
+    expected_filter_prefix: str,
+) -> None:
+    controller = GuiController(viewer=object(), widgets=object())
+    controller._current_input_path = 'c:/photos/test_photo.dng'
+    output_layer = _make_output_layer(
+        np.full((2, 2, 3), 0.5, dtype=np.float32),
+        output_color_space='sRGB',
+        output_cctf_encoding=True,
+    )
+    gui_state = make_test_controller_gui_state()
+    captured: dict[str, object] = {}
+
+    dialog_args = {}
+
+    def fake_get_save_file_name(_parent, _title, filename, file_filter):
+        dialog_args['filename'] = filename
+        dialog_args['file_filter'] = file_filter
+        return f'/export/test_photo{expected_ext}', 'Images'
+
+    monkeypatch.setattr(controller, '_output_layer', lambda: output_layer)
+    monkeypatch.setattr(controller_module, 'dialog_parent', lambda viewer: None)
+    monkeypatch.setattr(controller_module, 'set_status', lambda viewer, msg: None)
+    monkeypatch.setattr(controller_module, 'collect_gui_state', lambda *, widgets: gui_state)
+    monkeypatch.setattr(controller_module._DirMemoryDialog, 'get_save_file_name', lambda self, parent, title, filename, file_filter: fake_get_save_file_name(parent, title, filename, file_filter))
+    _capture_saved_output(monkeypatch, captured)
+
+    controller.save_output_layer(output_format=output_format)
+
+    assert dialog_args['filename'] == f'test_photo{expected_ext}'
+    assert dialog_args['file_filter'].startswith(expected_filter_prefix)
+    assert captured['saved'][0] == f'/export/test_photo{expected_ext}'
+
+
+def test_save_output_layer_appends_format_extension_when_omitted(monkeypatch) -> None:
+    controller = GuiController(viewer=object(), widgets=object())
+    output_layer = _make_output_layer(
+        np.full((2, 2, 3), 0.5, dtype=np.float32),
+        output_color_space='sRGB',
+        output_cctf_encoding=True,
+    )
+    gui_state = make_test_controller_gui_state()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(controller, '_output_layer', lambda: output_layer)
+    monkeypatch.setattr(controller_module, 'dialog_parent', lambda viewer: None)
+    monkeypatch.setattr(controller_module, 'set_status', lambda viewer, msg: None)
+    monkeypatch.setattr(controller_module, 'collect_gui_state', lambda *, widgets: gui_state)
+    monkeypatch.setattr(
+        controller_module._DirMemoryDialog,
+        'get_save_file_name',
+        lambda self, parent, title, filename, file_filter: ('/export/unextended_output', 'Images'),
+    )
+    _capture_saved_output(monkeypatch, captured)
+
+    controller.save_output_layer(output_format='webp')
+
+    assert captured['saved'][0] == '/export/unextended_output.webp'

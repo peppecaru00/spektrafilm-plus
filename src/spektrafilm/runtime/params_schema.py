@@ -98,6 +98,7 @@ class GrainParams:
     blur_dye_clouds_um: float = 1.0
     micro_structure: tuple[float, float] = (0.2, 30)
     n_sub_layers: int = 1
+    seed: int | None = None
 
 
 @dataclass
@@ -191,6 +192,8 @@ class IOParams:
     crop_size: tuple[float, float] = (0.1, 0.1)
     upscale_factor: float = 1.0
     scan_film: bool = False
+    chroma_denoise: bool = False
+    chroma_denoise_strength: float = 1.0
 
 
 @dataclass
@@ -230,7 +233,8 @@ class SettingsParams:
     preview_max_size: int = 640
     preview_mode: bool = False
     neutral_print_filters_from_database: bool = True
-    
+    device: str = "auto"  # 'auto', 'cuda', or 'cpu'
+    precision: str = "float32"  # 'float32' or 'float64'
 
 @dataclass
 class RuntimePhotoParams:

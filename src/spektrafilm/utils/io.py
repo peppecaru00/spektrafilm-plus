@@ -239,6 +239,8 @@ def save_image_oiio(
       ``bit_depth`` is ignored.
     - ``.png``: clipped to [0, 1] and written as uint8. ``bit_depth`` is
       ignored.
+    - ``.webp``: clipped to [0, 1] and written as uint8. ``bit_depth`` is
+      ignored.
     - ``.tif`` / ``.tiff``: ``bit_depth`` selects the encoding —
       8 → uint8 (clipped, scaled to [0, 255]),
       16 → uint16 (clipped, scaled to [0, 65535]),
@@ -254,10 +256,10 @@ def save_image_oiio(
     When ``color_space`` is provided and a matching ICC profile exists in
     ``spektrafilm/data/icc/`` (see the table in ``_ICC_FILENAMES``), the
     profile bytes are embedded into the file's native ICC slot:
-    JPEG APP2 marker, PNG iCCP chunk, or TIFF ICCProfile tag. EXR carries
-    its own color metadata so ICC embedding is skipped there. Missing
-    profiles fall back to no embedding — the EXIF/XMP color-space tagging
-    written by ``write_image_metadata`` still labels the file.
+    JPEG APP2 marker, PNG iCCP chunk, TIFF ICCProfile tag, or WebP ICCP.
+    EXR carries its own color metadata so ICC embedding is skipped there.
+    Missing profiles fall back to no embedding — the EXIF/XMP color-space
+    tagging written by ``write_image_metadata`` still labels the file.
 
     Parameters
     ----------
@@ -267,8 +269,8 @@ def save_image_oiio(
         Image data with shape ``(height, width, 3)``. Floating-point input
         is assumed to be in [0, 1] for integer-encoded formats.
     bit_depth : int, default 16
-        Precision selector for TIFF and EXR (see above). Ignored for JPEG
-        and PNG.
+        Precision selector for TIFF and EXR (see above). Ignored for JPEG,
+        PNG, and WebP.
     color_space : str, optional
         Name of the color space the pixels are encoded in (e.g. ``"sRGB"``,
         ``"Display P3"``). Used to look up the ICC profile to embed.
@@ -290,6 +292,11 @@ def save_image_oiio(
         spec = oiio.ImageSpec(width, height, nchannels, oiio.TypeDesc("uint8"))
         data_to_write = img_uint8
     elif ext in {"jpg", "jpeg"}:
+        img_uint8 = np.clip(image_data, 0, 1) * 255.0
+        img_uint8 = img_uint8.astype(np.uint8)
+        spec = oiio.ImageSpec(width, height, nchannels, oiio.TypeDesc("uint8"))
+        data_to_write = img_uint8
+    elif ext == "webp":
         img_uint8 = np.clip(image_data, 0, 1) * 255.0
         img_uint8 = img_uint8.astype(np.uint8)
         spec = oiio.ImageSpec(width, height, nchannels, oiio.TypeDesc("uint8"))

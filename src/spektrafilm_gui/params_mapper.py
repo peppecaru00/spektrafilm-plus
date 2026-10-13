@@ -102,6 +102,7 @@ def _apply_scanner(params: RuntimePhotoParams, state: GuiState) -> None:
 def _apply_settings(params: RuntimePhotoParams, state: GuiState) -> None:
     params.settings = replace(state.input_image.settings)
     params.settings.preview_max_size = state.gui_only.display.settings.preview_max_size
+    params.settings.device = state.gui_only.display.settings.device
     params.settings.use_enlarger_lut = True
     params.settings.use_scanner_lut = True
     params.settings.lut_resolution = 17

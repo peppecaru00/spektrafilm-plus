@@ -364,9 +364,10 @@ class ViewerLayerService:
         output_cctf_encoding: bool,
         use_display_transform: bool,
         output_interpolation_mode: str = 'spline36',
+        animate: bool = True,
     ) -> None:
         existing_layer = self.image_layer(OUTPUT_LAYER_NAME)
-        animate_on_show = existing_layer is None or not bool(getattr(existing_layer, 'visible', True))
+        animate_on_show = animate and (existing_layer is None or not bool(getattr(existing_layer, 'visible', True)))
         output_image = np.asarray(image)
         output_shape = tuple(int(dimension) for dimension in output_image.shape)
         crossfade_source_image: np.ndarray | None = None
@@ -379,7 +380,7 @@ class ViewerLayerService:
             if animate_on_show:
                 replace_layer = existing_shape != output_shape
             else:
-                use_crossfade = _supports_output_layer_crossfade(existing_data, output_image)
+                use_crossfade = animate and _supports_output_layer_crossfade(existing_data, output_image)
                 if use_crossfade:
                     crossfade_source_image = np.array(existing_data, copy=True)
                 replace_layer = not use_crossfade and existing_shape != output_shape
@@ -424,6 +425,7 @@ class ViewerLayerService:
                 target_image=output_image,
             )
         else:
+            _set_layer_data(layer, np.array(output_image, copy=True))
             _refresh_layer(layer)
 
     def output_layer(self) -> NapariImageLayer | None:

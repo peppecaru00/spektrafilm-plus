@@ -39,6 +39,7 @@ _SECTION_HEADER_ICONS = {
     'tune': 'tabler:stroke-curved',
     'experimental': 'tabler:flask',
     'gui parameters': 'tabler:adjustments-horizontal',
+    'compute device': 'tabler:cpu',
     'display': 'tabler:skew-x',
     'napari layers': 'tabler:stack-2',
 }

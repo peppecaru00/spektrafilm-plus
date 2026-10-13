@@ -347,3 +347,28 @@ def test_project_default_gui_state_matches_builder() -> None:
     )
 
     assert PROJECT_DEFAULT_GUI_STATE == built_state
+
+
+def test_build_params_maps_device_setting() -> None:
+    state = make_state()
+    state.gui_only.display.settings.device = "cuda"
+
+    params = build_params_from_state(state)
+    assert params.settings.device == "cuda"
+
+    state.gui_only.display.settings.device = "cpu"
+    params = build_params_from_state(state)
+    assert params.settings.device == "cpu"
+
+
+def test_display_state_device_roundtrip() -> None:
+    from spektrafilm_gui.state import display_to_dict, normalize_display_dict
+
+    state = make_state()
+    state.gui_only.display.settings.device = "cuda"
+
+    flat = display_to_dict(state.gui_only.display)
+    assert flat["device"] == "cuda"
+
+    normalized = normalize_display_dict(flat)
+    assert normalized["settings"]["device"] == "cuda"
