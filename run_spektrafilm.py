@@ -23,14 +23,34 @@ else:
 
 
 def _launch() -> None:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("IanoLiotta.SpektraFilmPlus.0.1.0")
+        except Exception:
+            pass
+
     from qtpy import QtWidgets
     # Ensure QApplication exists before any QWidget or plugin discovery
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
 
+    app.setApplicationName("SpektraFilm Plus")
+    app.setOrganizationName("IanoLiotta")
+    app.setApplicationVersion("0.1.0")
+
+    try:
+        from spektrafilm_gui.icons import get_app_icon
+        app_icon = get_app_icon()
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+    except Exception:
+        pass
+
     from spektrafilm_gui.app import main
     main()
+
 
 
 if __name__ == "__main__":

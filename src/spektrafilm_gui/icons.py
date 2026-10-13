@@ -61,3 +61,28 @@ def section_header_icon(title: str, size: int = HEADER_ICON_SIZE) -> QtGui.QIcon
         return QtGui.QIcon()
 
     return QtGui.QIcon(str(path))
+
+
+@lru_cache(maxsize=1)
+def get_app_icon() -> QtGui.QIcon:
+    """Return the application icon from packaged assets."""
+    import sys
+    from pathlib import Path
+
+    candidates: list[Path] = [
+        Path(__file__).resolve().parent / "assets" / "spektrafilm.ico",
+        Path(__file__).resolve().parent / "assets" / "spektrafilm.png",
+    ]
+    if getattr(sys, "frozen", False):
+        bundle_dir = Path(getattr(sys, "_MEIPASS", sys.executable)).resolve()
+        candidates.extend([
+            bundle_dir / "spektrafilm.ico",
+            bundle_dir / "spektrafilm_gui" / "assets" / "spektrafilm.ico",
+            bundle_dir / "spektrafilm_gui" / "assets" / "spektrafilm.png",
+        ])
+    for cand in candidates:
+        if cand.is_file():
+            icon = QtGui.QIcon(str(cand))
+            if not icon.isNull():
+                return icon
+    return QtGui.QIcon()

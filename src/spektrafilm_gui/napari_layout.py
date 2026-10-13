@@ -19,6 +19,7 @@ QStatusBar = QtWidgets.QStatusBar
 QScrollArea = QtWidgets.QScrollArea
 QWidget = QtWidgets.QWidget
 
+from spektrafilm_gui.icons import get_app_icon
 from spektrafilm_gui.theme import APP_STYLE_SHEET
 from spektrafilm_gui.theme_palette import (
     GRAY_0,
@@ -622,8 +623,8 @@ def build_main_window(
     status_bar.setSizeGripEnabled(False)
 
     main_window = AppMainWindow()
-    main_window.setWindowTitle('spektrafilm')
-    main_window.setWindowIcon(QIcon())
+    main_window.setWindowTitle('SpektraFilm Plus')
+    main_window.setWindowIcon(get_app_icon())
     total_width = DEFAULT_CONTROLS_PANEL_WIDTH + DEFAULT_VIEWER_SPLITTER_WIDTH
     if gallery_widget is not None:
         total_width += DEFAULT_GALLERY_WIDTH
