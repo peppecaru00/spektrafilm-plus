@@ -7,9 +7,47 @@
 > **2026/05/28 big git history cleanup** (140MB -> 45MB) --> please reclone!
 > 
 
-# Spectral film simulations of analog photography
+# Spektrafilm Plus — Spectral film simulations of analog photography
 
 An exploration of how to make good use of spectroscopic data from manufacturer datasheets in an end-to-end, physically based model with spectral calculations, with the goal of turning that data into convincing film, print, and scan renderings that can be explored interactively.
+
+## ✨ What's New in Spektrafilm Plus
+
+`spektrafilm-plus` significantly expands the simulation framework with GPU hardware acceleration, production batch workflows, professional color scopes, non-destructive editing history, and a modernized UI:
+
+### ⚡ GPU Acceleration (CUDA) & Precision Controls
+- **Full CUDA Pipeline**: Accelerated spectral upsampling, gamut compression (radial/octant/tanh/hyperbolic), halation/diffusion convolution, coupler chemical kinetics, and 3D LUT interpolation via custom CuPy kernels.
+- **Compute Precision Selector**: Switch between `float32` (rapid preview, lower VRAM consumption) and `float64` (full double-precision analytical accuracy).
+- **Graceful CPU Fallback**: Automatically falls back to multi-core Numba/NumPy on systems without an NVIDIA GPU.
+
+### 🎞️ Filmstrip Gallery & Batch Workflow
+- **Multi-Photo Filmstrip**: Resizable left panel with background-rendered thumbnails, multi-selection, and active photo status.
+- **Sidecar Metadata (`.spektrafilm.json`)**: Non-destructive parameter saving and sidecar persistence per photo.
+- **Batch Parameter Synchronization**: Select multiple photos and sync specific parameters (film stock, enlarger shifts, grain, exposure) with one click.
+- **Multi-Image Export**: Asynchronous background batch exporter with support for JPEG, 16-bit TIFF, PNG, and EXR, custom downsampling, and color space tag embedding.
+
+### 📊 Professional Scopes: RGB Parade & Live Histogram
+- **DaVinci-Style RGB Parade**: Split Red, Green, and Blue density distributions side-by-side to judge color balance, printer shifts, and emulsion contrast.
+- **Live Histogram**: Real-time luma/RGB distribution graph.
+- **Scope Switching & Resizing**: Instant toggle between Parade and Histogram views, with full horizontal and vertical split resizing.
+
+### 📈 Interactive Curve Editor with Live Histogram Underlay
+- **Interactive Multi-Point Curves**: Directly sculpt tonal curves with spline-interpolated control points.
+- **Live Histogram Backdrop**: Real-time histogram rendering directly behind the curve editor for precise visual exposure mapping.
+
+### ↺ Full Undo / Redo History
+- **State History Manager**: Full multi-step undo and redo across all slider tweaks, curve edits, and profile changes.
+- **Standard Keyboard Shortcuts**: `Ctrl+Z` (Undo), `Ctrl+Y` and `Ctrl+Shift+Z` (Redo), plus dedicated footer toolbar buttons.
+
+### 📷 Enhanced RAW Processing & Chroma Denoising
+- **Chroma Denoise Filter**: Eliminates high-frequency digital sensor color noise before chemical grain generation, preventing digital noise artifacts in analog emulsion grain.
+- **Comprehensive EXIF & Camera Profiles**: Robust extraction of camera white balance, color matrices, and exposure metadata.
+
+### 🎨 Modernized Interface & Framed Viewport
+- **Option 2 Smooth UI**: Refined ~8px–10px corner radiuses across all panels, cards, sliders, and controls.
+- **Internal Rounded Viewport**: Native anti-aliased viewport overlay framing the OpenGL canvas with zero margin gap and full mouse event passthrough (`WA_TransparentForMouseEvents`).
+
+---
 
 Here are some useful links and spin-off projects:
 - Discussion about the project is happeing at [discuss.pixls.us](https://discuss.pixls.us/c/software/spektrafilm/).
@@ -232,7 +270,7 @@ includes the desktop GUI and LUT-creator dependencies; only development tools
 remain optional:
 
 ```bash
-uvx --python 3.13 --from git+https://github.com/andreavolpato/spektrafilm.git spektrafilm
+uvx --python 3.13 --from git+https://github.com/peppecaru00/spektrafilm-plus.git spektrafilm
 ```
 
 Or from a local working copy:
@@ -244,7 +282,7 @@ Alternatively, you can install spektrafilm permanently which will provide you
 the `spektrafilm` command:
 
 ```bash
-uv tool install --python 3.13 git+https://github.com/andreavolpato/spektrafilm.git
+uv tool install --python 3.13 git+https://github.com/peppecaru00/spektrafilm-plus.git
 ```
 
 For full development, install the project with `[dev]` to add the test tooling
@@ -269,12 +307,14 @@ and LUT-creator dependencies; `dev` is the only remaining optional extra.
 
 ```bash
 # install the default package (desktop app + LUT creator included):
-git clone https://github.com/andreavolpato/spektrafilm.git
-cd spektrafilm
+git clone https://github.com/peppecaru00/spektrafilm-plus.git
+cd spektrafilm-plus
 pip install -e .
 
 # run
 spektrafilm
+# or run via launcher script:
+python run_spektrafilm.py
 ```
 I recommend creating a clean virtual environment to install the dependencies,
 for example by using `conda`.
