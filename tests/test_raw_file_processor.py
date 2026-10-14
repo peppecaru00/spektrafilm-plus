@@ -640,6 +640,102 @@ def test_read_raw_white_balance_from_exif(monkeypatch, tmp_path):
     assert tint == 1.10  # 1.0 + 10/100
 
 
+def test_read_raw_white_balance_sony_arw_real_scales(monkeypatch, tmp_path):
+    """Ensure Sony ARW with AWB (ColorTemperature=0) uses rawpy multipliers with correct matrix inversion and scales."""
+    raw_file = tmp_path / "DSC00579.ARW"
+    raw_file.write_bytes(b"\x00" * 100)
+
+    class FakeSonyRaw:
+        camera_whitebalance = [2604.0, 1024.0, 1964.0, 1024.0]
+        daylight_whitebalance = [2.90722179, 0.9360556, 1.45619607, 0.0]
+        rgb_xyz_matrix = np.array(
+            [
+                [0.6355, -0.2067, -0.049],
+                [-0.3653, 1.1542, 0.24],
+                [-0.0406, 0.1258, 0.5506],
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeExifVal:
+        def __init__(self, val):
+            self._val = val
+
+        def value(self):
+            return self._val
+
+    class FakeSonyImage:
+        def readMetadata(self):
+            pass
+
+        def exifData(self):
+            # Sony sets ColorTemperature to 0 in Auto WB
+            return {
+                "Exif.Sony2.ColorTemperature": FakeExifVal(0),
+                "Exif.Sony2.WhiteBalance": FakeExifVal(0),
+                "Exif.Sony2.WBShiftABGM": FakeExifVal("0 0"),
+            }
+
+        def xmpData(self):
+            return {}
+
+    monkeypatch.setattr(raw_file_processor.rawpy, "imread", lambda p: FakeSonyRaw())
+    monkeypatch.setattr(
+        raw_file_processor,
+        "exiv2",
+        SimpleNamespace(ImageFactory=SimpleNamespace(open=lambda p: FakeSonyImage())),
+    )
+
+    cct, tint = raw_file_processor.read_raw_white_balance(raw_file)
+    # Realistic indoor temperature for DSC00579 (~4578 K), NOT broken ~9573 K
+    assert 4500.0 <= cct <= 4650.0
+    assert 0.95 <= tint <= 1.05
+
+
+def test_read_raw_white_balance_exif_fine_tune(monkeypatch, tmp_path):
+    """Ensure Sony and Panasonic fine-tune adjustments shift the tint properly."""
+    raw_file = tmp_path / "tuned.arw"
+    raw_file.write_bytes(b"\x00" * 100)
+
+    class FakeExifVal:
+        def __init__(self, val):
+            self._val = val
+
+        def value(self):
+            return self._val
+
+    class FakeTunedImage:
+        def readMetadata(self):
+            pass
+
+        def exifData(self):
+            return {
+                "Exif.Sony2.ColorTemperature": FakeExifVal(5500),
+                "Exif.Sony2.WBShiftABGM": FakeExifVal("0 2"),  # GM shift +2 -> +0.05
+            }
+
+        def xmpData(self):
+            return {}
+
+    monkeypatch.setattr(raw_file_processor.rawpy, "imread", lambda p: (_ for _ in ()).throw(RuntimeError))
+    monkeypatch.setattr(
+        raw_file_processor,
+        "exiv2",
+        SimpleNamespace(ImageFactory=SimpleNamespace(open=lambda p: FakeTunedImage())),
+    )
+
+    cct, tint = raw_file_processor.read_raw_white_balance(raw_file)
+    assert cct == 5500.0
+    assert tint == 1.05
+
+
 def test_safe_get_exif_dict_and_xmp_dict():
     # Test None
     assert raw_file_processor._safe_get_exif_dict(None) == {}

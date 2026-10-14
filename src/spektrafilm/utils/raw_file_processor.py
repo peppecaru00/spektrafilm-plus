@@ -276,37 +276,63 @@ def _cct_tint_from_wb_multipliers(
     if r_cam <= 0.0 or g_cam <= 0.0 or b_cam <= 0.0:
         return 5500.0, 1.0
 
-    if day_wb and len(day_wb) >= 3 and day_wb[0] > 0 and day_wb[1] > 0 and day_wb[2] > 0:
-        r_day, g_day, b_day = float(day_wb[0]), float(day_wb[1]), float(day_wb[2])
-        rgb_scene = np.array([r_day / r_cam, g_day / g_cam, b_day / b_cam], dtype=np.float64)
-    else:
-        rgb_scene = np.array([1.0 / r_cam, 1.0 / g_cam, 1.0 / b_cam], dtype=np.float64)
-        rgb_scene /= rgb_scene[1]
+    # Camera sensor response to neutral illuminant:
+    # Under the scene illuminant, a neutral surface satisfies:
+    # R_sensor * r_cam = G_sensor * g_cam = B_sensor * b_cam
+    # => R_sensor / G_sensor = g_cam / r_cam, B_sensor / G_sensor = g_cam / b_cam
+    sensor_rgb = np.array([g_cam / r_cam, 1.0, g_cam / b_cam], dtype=np.float64)
 
-    if rgb_xyz is not None and hasattr(rgb_xyz, "shape") and rgb_xyz.shape[0] >= 3 and rgb_xyz.shape[1] >= 3:
-        mat = np.asarray(rgb_xyz[:3, :3], dtype=np.float64)
-        xyz = rgb_scene @ mat
-    else:
-        mat = np.array(
-            [
-                [0.4124564, 0.3575761, 0.1804375],
-                [0.2126729, 0.7151522, 0.0721750],
-                [0.0193339, 0.1191920, 0.9503041],
-            ],
-            dtype=np.float64,
-        )
-        xyz = mat @ rgb_scene
+    # Convert Camera RGB sensor response to CIE XYZ:
+    # In LibRaw, rgb_xyz_matrix is (3,3) or (4,3) mapping CIE XYZ under D65 to Camera RGB.
+    # Therefore, Camera RGB to XYZ is the inverse of rgb_xyz[:3, :3].
+    xyz = None
+    if rgb_xyz is not None:
+        try:
+            arr = np.asarray(rgb_xyz, dtype=np.float64)
+            if arr.ndim == 2 and arr.shape[0] >= 3 and arr.shape[1] >= 3:
+                sub = arr[:3, :3]
+                # If sub is not a dummy identity matrix and is invertible:
+                if not np.allclose(sub, np.eye(3)) and abs(np.linalg.det(sub)) > 1e-5:
+                    cam_to_xyz = np.linalg.inv(sub)
+                    xyz = cam_to_xyz @ sensor_rgb
+        except Exception:
+            pass
+
+    if xyz is None or np.any(np.isnan(xyz)) or np.all(xyz <= 0):
+        # Fallback when no valid camera matrix is available:
+        if day_wb is not None and len(day_wb) >= 3 and day_wb[0] > 0 and day_wb[1] > 0 and day_wb[2] > 0:
+            # Multipliers relative to daylight D65:
+            r_rel = (float(day_wb[0]) / float(day_wb[1])) / (r_cam / g_cam)
+            b_rel = (float(day_wb[2]) / float(day_wb[1])) / (b_cam / g_cam)
+            xyz = np.array([r_rel * 0.95047, 1.0, b_rel * 1.08883], dtype=np.float64)
+        else:
+            mat_srgb = np.array(
+                [
+                    [0.4124564, 0.3575761, 0.1804375],
+                    [0.2126729, 0.7151522, 0.0721750],
+                    [0.0193339, 0.1191920, 0.9503041],
+                ],
+                dtype=np.float64,
+            )
+            xyz = mat_srgb @ sensor_rgb
 
     xyz = np.maximum(xyz, 1e-6)
+    if xyz[1] <= 0:
+        return 5500.0, 1.0
     xyz_norm = xyz / xyz[1]
     xy = colour.XYZ_to_xy(xyz_norm)
 
-    try:
-        cct = float(colour.xy_to_CCT(xy, method="Hernandez 1999"))
-    except Exception:
-        cct = 5500.0
+    cct = None
+    for method in ("Hernandez 1999", "Kang 2002", "McCamy 1992"):
+        try:
+            val = float(colour.xy_to_CCT(xy, method=method))
+            if 1500.0 <= val <= 25000.0 and not np.isnan(val):
+                cct = val
+                break
+        except Exception:
+            pass
 
-    if not (1500.0 <= cct <= 25000.0) or np.isnan(cct):
+    if cct is None:
         cct = 5500.0
 
     locus_xyz = _whitepoint_xyz_from_temperature(cct)
@@ -507,6 +533,16 @@ def read_raw_white_balance(raw_path: str | PathLike[str]) -> tuple[float, float]
             val = _parse_exif_numeric(datum.value() if hasattr(datum, "value") else datum)
             if val is not None and -150.0 <= val <= 150.0:
                 exif_tint = round(1.0 + (val / 100.0), 2)
+        elif exif_dict:
+            if "Exif.Sony2.WBShiftABGM" in exif_dict:
+                v_str = str(exif_dict["Exif.Sony2.WBShiftABGM"].value() if hasattr(exif_dict["Exif.Sony2.WBShiftABGM"], "value") else exif_dict["Exif.Sony2.WBShiftABGM"])
+                parts = [_parse_exif_numeric(p) for p in v_str.split()]
+                if len(parts) >= 2 and parts[1] is not None and parts[1] != 0:
+                    exif_tint = round(1.0 + (parts[1] * 0.025), 2)
+            elif "Exif.Panasonic.WBAdjustGM" in exif_dict:
+                v = _parse_exif_numeric(exif_dict["Exif.Panasonic.WBAdjustGM"].value() if hasattr(exif_dict["Exif.Panasonic.WBAdjustGM"], "value") else exif_dict["Exif.Panasonic.WBAdjustGM"])
+                if v is not None and v != 0:
+                    exif_tint = round(1.0 + (v * 0.025), 2)
     except Exception:
         pass
 

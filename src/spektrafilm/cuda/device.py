@@ -19,6 +19,45 @@ _CUDA_DEVICE_INFO: dict[str, Any] | None = None
 _MANAGED_POOL: Any = None
 
 
+def _configure_windows_cuda_dlls() -> None:
+    """Ensure all bundled and site-packages NVIDIA CUDA DLLs are registered on Windows."""
+    if sys.platform != "win32" or not hasattr(sys, "add_dll_directory"):
+        import os
+        if not hasattr(os, "add_dll_directory"):
+            return
+
+    import os
+    from pathlib import Path
+
+    # 1. In frozen mode (PyInstaller onedir), register bundle_dir and all subdirectories with DLLs
+    if getattr(sys, "frozen", False):
+        bundle_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        try:
+            os.add_dll_directory(bundle_dir)
+        except Exception:
+            pass
+        for root, dirs, files in os.walk(bundle_dir):
+            if any(f.lower().endswith(".dll") for f in files):
+                try:
+                    os.add_dll_directory(root)
+                except Exception:
+                    pass
+        cuda_runtime_dir = os.path.join(bundle_dir, "nvidia", "cuda_runtime")
+        if os.path.isdir(cuda_runtime_dir):
+            os.environ.setdefault("CUDA_PATH", cuda_runtime_dir)
+
+    # 2. In normal Python or editable installs, register site-packages nvidia directories
+    for p in list(sys.path):
+        nvidia_cand = os.path.join(p, "nvidia")
+        if os.path.isdir(nvidia_cand):
+            for root, dirs, files in os.walk(nvidia_cand):
+                if any(f.lower().endswith(".dll") for f in files):
+                    try:
+                        os.add_dll_directory(root)
+                    except Exception:
+                        pass
+
+
 def get_cuda_init_error() -> str | None:
     """Return error message from CUDA initialization probe if it failed."""
     return _CUDA_INIT_ERROR
@@ -31,6 +70,7 @@ def is_cuda_available() -> bool:
         return _CUPY_AVAILABLE
 
     try:
+        _configure_windows_cuda_dlls()
         import cupy as cp
         # Probe device count and properties
         count = cp.cuda.runtime.getDeviceCount()
