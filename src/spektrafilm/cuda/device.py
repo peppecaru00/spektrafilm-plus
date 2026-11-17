@@ -88,6 +88,12 @@ def is_cuda_available() -> bool:
             # Window Manager (DWM), freezing the mouse cursor and the entire Windows GUI.
             # Standard device memory pool (cudaMalloc) runs directly in physical VRAM with zero
             # PCIe page faulting, preventing system freezes.
+            # Bound cached cuFFT plans (their work areas hold VRAM) instead of disabling the cache.
+            try:
+                cp.fft.config.get_plan_cache().set_memsize(512 * 1024**2)
+            except Exception as exc:
+                logger.debug("FFT plan cache configuration failed: %s", exc)
+
             if sys.platform != "win32":
                 try:
                     if hasattr(cp.cuda, "malloc_managed"):
@@ -209,8 +215,12 @@ def synchronize() -> None:
         cp.cuda.Stream.null.synchronize()
 
 
-def free_memory() -> None:
-    """Free cached blocks from GPU and managed memory pools."""
+def free_memory(clear_fft_plans: bool = True) -> None:
+    """Free cached blocks from GPU and managed memory pools.
+
+    ``clear_fft_plans=False`` keeps cuFFT plans so the next render of the same
+    size skips re-planning (used between interactive renders).
+    """
     if is_cuda_available():
         import cupy as cp
         try:
@@ -218,5 +228,10 @@ def free_memory() -> None:
                 _MANAGED_POOL.free_all_blocks()
             cp.get_default_memory_pool().free_all_blocks()
             cp.get_default_pinned_memory_pool().free_all_blocks()
+            if clear_fft_plans:
+                try:
+                    cp.fft.config.get_plan_cache().clear()
+                except Exception:
+                    pass
         except Exception:
             pass

@@ -590,3 +590,39 @@ def test_simulation_section_save_menu_formats_and_signals() -> None:
     for idx, expected_fmt in enumerate(['tif', 'png', 'jpg', 'webp']):
         actions[idx].trigger()
         assert emitted[-1] == expected_fmt
+
+
+
+def test_load_raw_section_auto_wb_and_pipette_buttons() -> None:
+    section, _emitted = _make_load_raw_section()
+
+    assert hasattr(section, 'auto_wb_button')
+    assert hasattr(section, 'pipette_button')
+    assert section.auto_wb_button.isEnabled() is False
+    assert section.pipette_button.isEnabled() is False
+
+    auto_wb_signals = []
+    wb_picker_signals = []
+    section.auto_wb_requested.connect(lambda: auto_wb_signals.append(True))
+    section.wb_picker_toggled.connect(wb_picker_signals.append)
+
+    widgets_module.LoadRawSection.set_path(section, 'C:/photos/image.arw')
+    assert section.auto_wb_button.isEnabled() is True
+    assert section.pipette_button.isEnabled() is True
+
+    section.auto_wb_button.click()
+    assert len(auto_wb_signals) == 1
+
+    section.pipette_button.click()
+    assert section.pipette_button.isChecked() is True
+    assert wb_picker_signals == [True]
+
+    section.set_white_balance_custom(4800.0, 1.15)
+    assert section.white_balance.value == 'custom'
+    assert section.temperature.value == 4800.0
+    assert section.tint.value == 1.15
+    assert section.pipette_button.isChecked() is False
+
+    widgets_module.LoadRawSection.set_path(section, '')
+    assert section.auto_wb_button.isEnabled() is False
+    assert section.pipette_button.isEnabled() is False

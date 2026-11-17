@@ -657,6 +657,10 @@ class HistogramWidget(QtWidgets.QFrame):
                 border: none;
                 padding: 0;
             }}
+            QPushButton:hover {{
+                background-color: #ffffff;
+                color: #000;
+            }}
         """
         inactive_style = f"""
             QPushButton {{
@@ -693,6 +697,10 @@ class HistogramWidget(QtWidgets.QFrame):
                         border-radius: 4px;
                         border: none;
                         padding: 0;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #ffffff;
+                        color: #000;
                     }}
                 """)
             else:

@@ -143,6 +143,54 @@ def test_cuda_aces_rgc_parity():
     np.testing.assert_allclose(gpu_out, cpu_out, atol=1e-14, rtol=1e-14)
 
 
+@pytest.mark.parametrize("cs", ["sRGB", "Display P3", "ITU-R BT.2020"])
+@pytest.mark.parametrize("lc", [None, (0.7, 1.0, 2.2)])
+def test_cuda_cam16ucs_parity(cs, lc):
+    """GPU CAM16-UCS compression matches the colour-science CPU path."""
+    import cupy as cp
+    from spektrafilm.utils.gamut_compression import compress_rgb_cam16ucs_chroma
+    from spektrafilm.cuda.gamut_compression import cuda_compress_rgb_cam16ucs_chroma
+
+    rng = np.random.default_rng(1)
+    # Non-negative stimuli: the negative-luminance region is ill-conditioned in the CPU
+    # reference itself (1e-7 input jitter moves its output by >1e3), so only f64 checks it.
+    rgb = np.concatenate([rng.uniform(0.0, 1.5, (20000, 3)), np.eye(3), np.zeros((1, 3))])
+    rgb_neg = rng.uniform(-0.2, 1.5, (20000, 3))
+    kw = dict(threshold=0.75, limit=1.2, power=1.2, lightness_compression=lc)
+    with np.errstate(all="ignore"):
+        ref = compress_rgb_cam16ucs_chroma(rgb, cs, **kw)
+        ref_neg = compress_rgb_cam16ucs_chroma(rgb_neg, cs, **kw)
+
+    g32 = cuda_compress_rgb_cam16ucs_chroma(cp.asarray(rgb, dtype=cp.float32), cs, **kw)
+    assert g32.dtype == cp.float32
+    np.testing.assert_allclose(g32.get(), ref, atol=2e-4)
+    g64 = cuda_compress_rgb_cam16ucs_chroma(cp.asarray(rgb_neg), cs, **kw).get()
+    np.testing.assert_allclose(g64, ref_neg, rtol=1e-6, atol=1e-3)
+
+
+@pytest.mark.parametrize("name", ["oklch", "oklrab", "jzazbz"])
+@pytest.mark.parametrize("cs", ["sRGB", "Display P3", "ITU-R BT.2020"])
+@pytest.mark.parametrize("lc", [None, (0.7, 1.0, 2.2)])
+def test_cuda_perceptual_chroma_parity(name, cs, lc):
+    """GPU OkLch / OkLrab / JzAzBz compression matches the colour-science CPU path."""
+    import cupy as cp
+    import spektrafilm.utils.gamut_compression as cpu_gc
+    import spektrafilm.cuda.gamut_compression as gpu_gc
+
+    cpu = getattr(cpu_gc, f"compress_rgb_{name}_chroma")
+    gpu = getattr(gpu_gc, f"cuda_compress_rgb_{name}_chroma")
+    rng = np.random.default_rng(1)
+    rgb = np.concatenate([rng.uniform(-0.2, 1.5, (20000, 3)), np.eye(3), np.zeros((1, 3))])
+    kw = dict(threshold=0.75, limit=1.2, power=1.2, lightness_compression=lc)
+    ref = cpu(rgb, cs, **kw)
+
+    np.testing.assert_allclose(gpu(cp.asarray(rgb), cs, **kw).get(), ref, atol=1e-6)
+    pos = (rgb >= 0).all(axis=-1)
+    g32 = gpu(cp.asarray(rgb[pos], dtype=cp.float32), cs, **kw)
+    assert g32.dtype == cp.float32
+    np.testing.assert_allclose(g32.get(), ref[pos], atol=2e-5)
+
+
 def test_cuda_spectral_density_parity():
     """Verify spectral tensor dot product on GPU matches opt_einsum CPU output."""
     from opt_einsum import contract
@@ -419,6 +467,17 @@ def test_cuda_young_van_vliet_iir_precision():
         max_diff = np.max(np.abs(cpu_res - gpu_res))
         assert max_diff < 1e-11, f"YvV filter mismatch for sigma={sigma}: max_diff={max_diff}"
 
+    # Regression test: mixed per-channel sigmas straddling the 3.0 px YVV threshold
+    mixed_sigma = (2.9019, 3.0267, 2.8395)
+    cpu_mixed = fast_gaussian_filter(img, mixed_sigma)
+    gpu_mixed_f64 = to_cpu(cuda_gaussian_filter(to_device(img), mixed_sigma))
+    assert np.max(np.abs(cpu_mixed - gpu_mixed_f64)) < 1e-3
+
+    img_f32 = img.astype(np.float32)
+    gpu_mixed_f32 = to_cpu(cuda_gaussian_filter(to_device(img_f32), mixed_sigma))
+    assert np.max(np.abs(cpu_mixed - gpu_mixed_f32)) < 1e-3
+
+
 
 def test_cuda_grain_seed_randomization():
     """Verify different seeds produce different grain patterns while same seed produces identical grain."""
@@ -453,3 +512,21 @@ def test_cuda_grain_seed_randomization():
     assert np.isclose(out_seed1_a.std(), out_seed2.std(), rtol=0.05), "Statistical grain intensity should match across seeds!"
 
 
+
+
+def test_cuda_apply_diffusion_filter():
+    """Verify GPU diffusion filter matches CPU reference within numerical precision."""
+    if not is_cuda_available():
+        pytest.skip("CUDA not available")
+
+    from spektrafilm.model.diffusion import apply_diffusion_filter_um
+    from spektrafilm.cuda.filters import cuda_apply_diffusion_filter_um
+    from spektrafilm.runtime.params_schema import DiffusionFilterParams
+
+    df = DiffusionFilterParams(active=True, filter_family='pro_mist', strength=0.25, halo_warmth=0.5)
+    img_f32 = np.random.uniform(0.1, 0.9, (128, 160, 3)).astype(np.float32)
+
+    cpu_res = apply_diffusion_filter_um(img_f32, df, 40.0)
+    gpu_res = to_cpu(cuda_apply_diffusion_filter_um(to_device(img_f32), df, 40.0))
+    diff = np.max(np.abs(cpu_res - gpu_res))
+    assert diff < 1e-6, f"GPU diffusion filter mismatch: {diff}"

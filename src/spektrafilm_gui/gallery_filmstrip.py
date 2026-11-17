@@ -508,10 +508,33 @@ class GalleryFilmstripWidget(QtWidgets.QWidget):
         fc_layout.setSpacing(4)
 
         # 2. Compact Vertical Header Toolbar
-        self.toolbar = QtWidgets.QWidget()
+        self.toolbar = QtWidgets.QFrame()
+        self.toolbar.setObjectName("galleryToolbar")
+        self.toolbar.setAttribute(Qt.WA_StyledBackground, True)
         tb_layout = QtWidgets.QVBoxLayout(self.toolbar)
-        tb_layout.setContentsMargins(2, 2, 2, 2)
+        tb_layout.setContentsMargins(4, 4, 4, 4)
         tb_layout.setSpacing(4)
+
+        btn_style_primary = f"""
+            QPushButton {{
+                background-color: {GRAY_2};
+                color: {TEXT_MAIN};
+                border: 1px solid {GRAY_3};
+                border-radius: 5px;
+                font-size: 11px;
+                font-weight: {FONT_WEIGHT_SEMIBOLD};
+                padding: 2px 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {GRAY_3};
+                border-color: #555555;
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_1};
+                border-color: {GRAY_4};
+            }}
+        """
 
         # Row 1: 📁 Folder & ➕ Add
         row1 = QtWidgets.QHBoxLayout()
@@ -520,39 +543,65 @@ class GalleryFilmstripWidget(QtWidgets.QWidget):
 
         self.open_folder_btn = QtWidgets.QPushButton("📁 Folder")
         self.open_folder_btn.setToolTip("Open a directory of photos (RAW / RGB)")
-        self.open_folder_btn.setFixedHeight(24)
+        self.open_folder_btn.setFixedHeight(26)
+        self.open_folder_btn.setStyleSheet(btn_style_primary)
         self.open_folder_btn.clicked.connect(self.open_folder_requested.emit)
-        row1.addWidget(self.open_folder_btn)
+        row1.addWidget(self.open_folder_btn, 1)
 
         self.add_files_btn = QtWidgets.QPushButton("➕ Add")
         self.add_files_btn.setToolTip("Add individual photo files to gallery")
-        self.add_files_btn.setFixedHeight(24)
+        self.add_files_btn.setFixedHeight(26)
+        self.add_files_btn.setStyleSheet(btn_style_primary)
         self.add_files_btn.clicked.connect(self.add_files_requested.emit)
-        row1.addWidget(self.add_files_btn)
+        row1.addWidget(self.add_files_btn, 1)
 
         tb_layout.addLayout(row1)
 
         # Row 2: Nav controls: ▲ / Photo X of Y / ▼
         row2 = QtWidgets.QHBoxLayout()
         row2.setContentsMargins(0, 0, 0, 0)
-        row2.setSpacing(2)
+        row2.setSpacing(4)
+
+        nav_btn_style = f"""
+            QPushButton {{
+                background-color: {GRAY_2};
+                color: {TEXT_MAIN};
+                border: 1px solid {GRAY_3};
+                border-radius: 5px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {GRAY_3};
+                border-color: #555555;
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_1};
+            }}
+            QPushButton:disabled {{
+                color: {GRAY_4};
+                border-color: {GRAY_2};
+            }}
+        """
 
         self.prev_btn = QtWidgets.QPushButton("▲")
         self.prev_btn.setToolTip("Previous photo (Up / Left arrow)")
-        self.prev_btn.setFixedSize(22, 22)
+        self.prev_btn.setFixedSize(26, 26)
+        self.prev_btn.setStyleSheet(nav_btn_style)
         self.prev_btn.clicked.connect(self.model.previous_photo)
         row2.addWidget(self.prev_btn)
 
         self.counter_label = QtWidgets.QLabel("No photos")
         self.counter_label.setAlignment(Qt.AlignCenter)
         self.counter_label.setStyleSheet(
-            f"color: {TEXT_HI}; font-size: 10px; font-weight: {FONT_WEIGHT_SEMIBOLD}; background: transparent; border: none;"
+            f"color: {TEXT_HI}; font-size: 11px; font-weight: {FONT_WEIGHT_SEMIBOLD}; background: transparent; border: none;"
         )
         row2.addWidget(self.counter_label, 1)
 
         self.next_btn = QtWidgets.QPushButton("▼")
         self.next_btn.setToolTip("Next photo (Down / Right arrow)")
-        self.next_btn.setFixedSize(22, 22)
+        self.next_btn.setFixedSize(26, 26)
+        self.next_btn.setStyleSheet(nav_btn_style)
         self.next_btn.clicked.connect(self.model.next_photo)
         row2.addWidget(self.next_btn)
 
@@ -561,72 +610,129 @@ class GalleryFilmstripWidget(QtWidgets.QWidget):
         # Row 3: Selection: [☑ All] [☐ None] Sel: 0
         row_sel = QtWidgets.QHBoxLayout()
         row_sel.setContentsMargins(0, 0, 0, 0)
-        row_sel.setSpacing(2)
+        row_sel.setSpacing(4)
 
+        sel_btn_style = f"""
+            QPushButton {{
+                background-color: {GRAY_2};
+                color: {TEXT_MAIN};
+                border: 1px solid {GRAY_3};
+                border-radius: 5px;
+                font-size: 11px;
+                padding: 2px 6px;
+            }}
+            QPushButton:hover {{
+                background-color: {GRAY_3};
+                border-color: #555555;
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_1};
+            }}
+            QPushButton:disabled {{
+                color: {GRAY_4};
+                border-color: {GRAY_2};
+            }}
+        """
         self.select_all_btn = QtWidgets.QPushButton("☑ All")
         self.select_all_btn.setToolTip("Select all photos in filmstrip (Ctrl+A)")
-        self.select_all_btn.setFixedHeight(20)
-        self.select_all_btn.setStyleSheet(f"font-size: 10px; padding: 1px 3px;")
+        self.select_all_btn.setFixedHeight(24)
+        self.select_all_btn.setMinimumWidth(54)
+        self.select_all_btn.setStyleSheet(sel_btn_style)
         self.select_all_btn.clicked.connect(self.model.select_all)
         row_sel.addWidget(self.select_all_btn)
 
         self.deselect_all_btn = QtWidgets.QPushButton("☐ None")
         self.deselect_all_btn.setToolTip("Deselect all photos (Escape)")
-        self.deselect_all_btn.setFixedHeight(20)
-        self.deselect_all_btn.setStyleSheet(f"font-size: 10px; padding: 1px 3px;")
+        self.deselect_all_btn.setFixedHeight(24)
+        self.deselect_all_btn.setMinimumWidth(60)
+        self.deselect_all_btn.setStyleSheet(sel_btn_style)
         self.deselect_all_btn.clicked.connect(self.model.deselect_all)
         row_sel.addWidget(self.deselect_all_btn)
 
         self.selection_label = QtWidgets.QLabel("Sel: 0")
-        self.selection_label.setAlignment(Qt.AlignCenter)
+        self.selection_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.selection_label.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 10px; background: transparent; border: none;"
+            f"color: {TEXT_DIM}; font-size: 11px; background: transparent; border: none; padding-right: 2px;"
         )
         row_sel.addWidget(self.selection_label, 1)
 
         tb_layout.addLayout(row_sel)
 
-        # Row 4: Action buttons: 📋 Copy Look | 📌 Paste Look | 🗑️ Del
+        # Row 4: Action buttons: 📋 Copy | 📌 Paste | 🗑️ Del
         row4 = QtWidgets.QHBoxLayout()
         row4.setContentsMargins(0, 0, 0, 0)
-        row4.setSpacing(3)
+        row4.setSpacing(4)
 
-        self.copy_btn = QtWidgets.QPushButton("📋")
+        action_btn_style = f"""
+            QPushButton {{
+                background-color: {GRAY_2};
+                color: {TEXT_MAIN};
+                border: 1px solid {GRAY_3};
+                border-radius: 5px;
+                font-size: 11px;
+                padding: 2px 2px;
+            }}
+            QPushButton:hover {{
+                background-color: {GRAY_3};
+                border-color: #555555;
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_1};
+            }}
+            QPushButton:disabled {{
+                color: {GRAY_4};
+                border-color: {GRAY_2};
+            }}
+        """
+        self.copy_btn = QtWidgets.QPushButton("📋 Copy")
         self.copy_btn.setToolTip("Copy active photo's entire look (Ctrl+C)")
-        self.copy_btn.setFixedHeight(24)
+        self.copy_btn.setFixedHeight(26)
+        self.copy_btn.setStyleSheet(action_btn_style)
         self.copy_btn.clicked.connect(self.copy_look_requested.emit)
-        row4.addWidget(self.copy_btn)
+        row4.addWidget(self.copy_btn, 1)
 
-        self.paste_btn = QtWidgets.QPushButton("📌")
+        self.paste_btn = QtWidgets.QPushButton("📌 Paste")
         self.paste_btn.setToolTip("Paste entire look to selected or active photo and auto-save (Ctrl+V)")
-        self.paste_btn.setFixedHeight(24)
+        self.paste_btn.setFixedHeight(26)
+        self.paste_btn.setStyleSheet(action_btn_style)
         self.paste_btn.clicked.connect(self.paste_look_requested.emit)
-        row4.addWidget(self.paste_btn)
+        row4.addWidget(self.paste_btn, 1)
 
-        self.remove_btn = QtWidgets.QPushButton("🗑️")
+        self.remove_btn = QtWidgets.QPushButton("🗑️ Del")
         self.remove_btn.setToolTip("Remove selected or active photo from filmstrip (Del / Backspace)")
-        self.remove_btn.setFixedHeight(24)
+        self.remove_btn.setFixedHeight(26)
+        self.remove_btn.setStyleSheet(action_btn_style)
         self.remove_btn.clicked.connect(self.remove_requested.emit)
-        row4.addWidget(self.remove_btn)
+        row4.addWidget(self.remove_btn, 1)
 
         tb_layout.addLayout(row4)
 
         # Row 5: ⚡ Sync Settings...
         self.sync_param_btn = QtWidgets.QPushButton("⚡ Sync Settings...")
         self.sync_param_btn.setToolTip("Sync or copy active settings across selected photos...")
-        self.sync_param_btn.setFixedHeight(24)
+        self.sync_param_btn.setFixedHeight(26)
         self.sync_param_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {GRAY_2};
                 color: {TEXT_HI};
                 border: 1px solid {GRAY_4};
-                border-radius: 6px;
-                font-size: 10px;
+                border-radius: 5px;
+                font-size: 11px;
                 font-weight: {FONT_WEIGHT_SEMIBOLD};
             }}
             QPushButton:hover {{
                 background-color: {GRAY_3};
                 border-color: {ACCENT_COLOR_TEXT};
+                color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_1};
+            }}
+            QPushButton:disabled {{
+                color: {GRAY_4};
+                border-color: {GRAY_3};
             }}
         """)
         self.sync_param_btn.clicked.connect(self.sync_param_requested.emit)
@@ -635,27 +741,35 @@ class GalleryFilmstripWidget(QtWidgets.QWidget):
         # Row 6: Primary Export Action: SCAN
         self.scan_all_btn = QtWidgets.QPushButton("🚀 SCAN ALL")
         self.scan_all_btn.setToolTip("Batch develop and export photos in the gallery using their .spktrflm settings")
-        self.scan_all_btn.setFixedHeight(26)
+        self.scan_all_btn.setFixedHeight(28)
         self.scan_all_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {ACCENT_COLOR_TEXT};
-                color: #000;
+                color: #000000;
                 font-weight: {FONT_WEIGHT_BOLD};
-                padding: 0 4px;
+                padding: 0 8px;
                 border-radius: 6px;
                 font-size: 11px;
+                border: 1px solid transparent;
             }}
             QPushButton:hover {{
-                background-color: #fca987;
+                background-color: #ffffff;
+                color: #000000;
+                border-color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_3};
+                color: {TEXT_HI};
             }}
             QPushButton:disabled {{
-                background-color: {GRAY_3};
-                color: {TEXT_DIM};
+                background-color: {GRAY_2};
+                color: {GRAY_4};
+                border: 1px solid {GRAY_3};
             }}
             QPushButton::menu-indicator {{
                 subcontrol-origin: padding;
                 subcontrol-position: center right;
-                right: 4px;
+                right: 8px;
             }}
         """)
 
@@ -680,7 +794,7 @@ class GalleryFilmstripWidget(QtWidgets.QWidget):
             QMenu::item:disabled {{
                 color: {TEXT_DIM};
             }}
-        """)
+        """ )
         self.scan_all_action = self.scan_menu.addAction("🚀 Scan All Photos")
         self.scan_all_action.triggered.connect(lambda: self.scan_all_requested.emit("all"))
         self.scan_selected_action = self.scan_menu.addAction("🚀 Scan Selected Photos")

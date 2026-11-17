@@ -25,6 +25,7 @@ RAW_AFFECTING_PARAM_IDS = frozenset({
     "highlight_recovery",
     "highlight_mode",
     "lens_correction",
+    "selected_lens",
     "chroma_denoise",
     "input_color_space",
     "input_cctf_decoding",
@@ -241,6 +242,15 @@ SINGLE_PARAMS: list[SingleParamDef] = [
         display_getter=lambda s: "Enabled" if s.gui_only.load_raw.lens_correction else "Disabled",
         getter=lambda s: bool(s.gui_only.load_raw.lens_correction),
         setter=lambda s, v: setattr(s.gui_only.load_raw, "lens_correction", bool(v)),
+    ),
+    SingleParamDef(
+        id="selected_lens",
+        name="Lens Profile",
+        category="RAW Processing",
+        description="Lensfun profile for distortion and vignette correction (Auto or manual)",
+        display_getter=lambda s: getattr(s.gui_only.load_raw, "selected_lens", "Auto"),
+        getter=lambda s: str(getattr(s.gui_only.load_raw, "selected_lens", "Auto")),
+        setter=lambda s, v: setattr(s.gui_only.load_raw, "selected_lens", str(v)),
     ),
     SingleParamDef(
         id="raw_exposure_ev",

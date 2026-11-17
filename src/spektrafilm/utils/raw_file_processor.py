@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import io
 import logging
 import os
@@ -356,6 +357,204 @@ def _cct_tint_from_wb_multipliers(
 
     return round(float(cct), 0), round(float(tint), 2)
 
+def solve_wb_for_aces_rgb(
+    sampled_rgb: np.ndarray | list[float] | tuple[float, ...],
+    current_temp: float = 5500.0,
+    current_tint: float = 1.0,
+) -> tuple[float, float]:
+    """Solve for correlated colour temperature (Kelvin) and tint that neutralizes a sampled ACES RGB color.
+
+    Parameters
+    ----------
+    sampled_rgb : np.ndarray | list[float] | tuple[float, ...]
+        The linear ACES RGB color of the surface that should be neutral (R=G=B).
+    current_temp : float, default 5500.0
+        The colour temperature (in Kelvin) with which the current image was developed.
+    current_tint : float, default 1.0
+        The tint multiplier with which the current image was developed.
+
+    Returns
+    -------
+    tuple[float, float]
+        (temperature_kelvin, tint)
+    """
+    arr = np.asarray(sampled_rgb, dtype=np.float64).ravel()
+    if arr.size < 3:
+        return float(current_temp), float(current_tint)
+
+    r, g, b = float(arr[0]), float(arr[1]), float(arr[2])
+    if r <= 1e-6 or g <= 1e-6 or b <= 1e-6 or not (np.isfinite(r) and np.isfinite(g) and np.isfinite(b)):
+        return float(current_temp), float(current_tint)
+
+    ref_white = _whitepoint_xyz_from_temperature(_DAYLIGHT_REFERENCE_TEMPERATURE)
+    curr_t = max(1500.0, min(25000.0, float(current_temp)))
+    curr_white = _whitepoint_xyz_from_temperature(curr_t)
+
+    # Invert current tint and current chromatic adaptation to recover daylight-base color
+    t_safe = max(0.1, min(10.0, float(current_tint)))
+    p_untint = np.array([[[r, g / t_safe, b]]], dtype=np.float32)
+    p_base = _apply_white_balance_adaptation(p_untint, ref_white, curr_white)
+
+    from scipy.optimize import brentq
+
+    def obj(t_cand: float) -> float:
+        src_w = _whitepoint_xyz_from_temperature(float(t_cand))
+        ad = _apply_white_balance_adaptation(p_base, src_w, ref_white)[0, 0]
+        return float(ad[0] - ad[2])
+
+    try:
+        f_min = obj(1500.0)
+        f_max = obj(25000.0)
+        if f_min * f_max <= 0:
+            t_opt = brentq(obj, 1500.0, 25000.0, xtol=1.0)
+        else:
+            t_opt = 1500.0 if abs(f_min) < abs(f_max) else 25000.0
+    except Exception:
+        t_opt = curr_t
+
+    t_opt = max(1500.0, min(25000.0, float(t_opt)))
+    src_opt = _whitepoint_xyz_from_temperature(t_opt)
+    ad_opt = _apply_white_balance_adaptation(p_base, src_opt, ref_white)[0, 0]
+    tint_opt = float(ad_opt[0] / max(float(ad_opt[1]), 1e-6))
+    tint_opt = max(0.2, min(5.0, tint_opt))
+
+    return round(float(t_opt), 0), round(float(tint_opt), 2)
+
+
+def calculate_spot_wb(
+    image: np.ndarray,
+    y: int,
+    x: int,
+    current_temp: float = 5500.0,
+    current_tint: float = 1.0,
+    patch_radius: int = 3,
+    colorspace: str = "ACES2065-1",
+) -> tuple[float, float]:
+    """Calculate the white balance (temperature and tint) to neutralize a patch centered at (y, x).
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Input image array of shape (H, W, 3).
+    y : int
+        Row index of the center of the patch.
+    x : int
+        Column index of the center of the patch.
+    current_temp : float, default 5500.0
+        The current colour temperature of the image in Kelvin.
+    current_tint : float, default 1.0
+        The current tint multiplier of the image.
+    patch_radius : int, default 3
+        Half-width of the square patch to sample (e.g. radius 3 -> 7x7 patch).
+    colorspace : str, default "ACES2065-1"
+        The colourspace of the image array.
+
+    Returns
+    -------
+    tuple[float, float]
+        (temperature_kelvin, tint)
+    """
+    if image is None or image.ndim < 3 or image.shape[2] < 3:
+        return float(current_temp), float(current_tint)
+
+    h, w = image.shape[:2]
+    cy = max(0, min(h - 1, int(y)))
+    cx = max(0, min(w - 1, int(x)))
+    r = max(0, int(patch_radius))
+
+    y0 = max(0, cy - r)
+    y1 = min(h, cy + r + 1)
+    x0 = max(0, cx - r)
+    x1 = min(w, cx + r + 1)
+
+    patch = np.asarray(image[y0:y1, x0:x1, :3], dtype=np.float32)
+    if patch.size == 0:
+        return float(current_temp), float(current_tint)
+
+    med_rgb = np.median(patch.reshape(-1, 3), axis=0)
+
+    if colorspace != "ACES2065-1" and colorspace in colour.RGB_COLOURSPACES:
+        try:
+            med_rgb = colour.RGB_to_RGB(
+                med_rgb,
+                input_colourspace=colour.RGB_COLOURSPACES[colorspace],
+                output_colourspace=_ACES_COLOURSPACE,
+                apply_cctf_decoding=False,
+                apply_cctf_encoding=False,
+            )
+        except Exception:
+            pass
+
+    return solve_wb_for_aces_rgb(med_rgb, current_temp=current_temp, current_tint=current_tint)
+
+
+def calculate_auto_wb(
+    image: np.ndarray,
+    current_temp: float = 5500.0,
+    current_tint: float = 1.0,
+    colorspace: str = "ACES2065-1",
+) -> tuple[float, float]:
+    """Calculate scene neutral white balance (temperature and tint) using robust gray-world estimation.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Input image array of shape (H, W, 3).
+    current_temp : float, default 5500.0
+        The current colour temperature of the image in Kelvin.
+    current_tint : float, default 1.0
+        The current tint multiplier of the image.
+    colorspace : str, default "ACES2065-1"
+        The colourspace of the image array.
+
+    Returns
+    -------
+    tuple[float, float]
+        (temperature_kelvin, tint)
+    """
+    if image is None or image.ndim < 3 or image.shape[2] < 3:
+        return float(current_temp), float(current_tint)
+
+    step = max(1, int(max(image.shape[:2]) // 500))
+    sample = np.asarray(image[::step, ::step, :3], dtype=np.float32)
+
+    lum = 0.2126 * sample[..., 0] + 0.7152 * sample[..., 1] + 0.0722 * sample[..., 2]
+
+    valid_lum = lum[np.isfinite(lum) & (lum > 0)]
+    if valid_lum.size > 100:
+        p_low, p_high = np.percentile(valid_lum, [10, 90])
+        p_low = max(p_low, 0.005)
+        p_high = min(p_high, 0.95)
+        mask = (lum >= p_low) & (lum <= p_high) & (sample.max(axis=-1) < 0.98)
+    else:
+        mask = (lum > 0.01) & (lum < 0.95)
+
+    if not np.any(mask):
+        mask = np.isfinite(lum) & (lum > 0)
+
+    if not np.any(mask):
+        return float(current_temp), float(current_tint)
+
+    med_r = float(np.median(sample[..., 0][mask]))
+    med_g = float(np.median(sample[..., 1][mask]))
+    med_b = float(np.median(sample[..., 2][mask]))
+    med_rgb = np.array([med_r, med_g, med_b], dtype=np.float32)
+
+    if colorspace != "ACES2065-1" and colorspace in colour.RGB_COLOURSPACES:
+        try:
+            med_rgb = colour.RGB_to_RGB(
+                med_rgb,
+                input_colourspace=colour.RGB_COLOURSPACES[colorspace],
+                output_colourspace=_ACES_COLOURSPACE,
+                apply_cctf_decoding=False,
+                apply_cctf_encoding=False,
+            )
+        except Exception:
+            pass
+
+    return solve_wb_for_aces_rgb(med_rgb, current_temp=current_temp, current_tint=current_tint)
+
+
 
 def _open_exiv2_image(raw_path: str | PathLike[str]) -> Any:
     """Open an image using exiv2 with fallback to Windows 8.3 short paths if needed."""
@@ -426,6 +625,10 @@ def _safe_get_xmp_dict(xmp: Any) -> dict[str, Any]:
     return xmp_dict
 
 
+_RAW_WB_CACHE: dict[tuple[str, float], tuple[float, float]] = {}
+_RESOLVED_RAW_CACHE: dict[tuple[str, float], str] = {}
+
+
 def read_raw_white_balance(raw_path: str | PathLike[str]) -> tuple[float, float]:
     """Read the actual as-shot white balance (temperature in Kelvin, tint) from a RAW file.
 
@@ -439,6 +642,17 @@ def read_raw_white_balance(raw_path: str | PathLike[str]) -> tuple[float, float]
         (temperature_kelvin, tint)
         Defaults to (5500.0, 1.0) if no metadata could be determined.
     """
+    cache_key: tuple[str, float] | None = None
+    try:
+        p_check = Path(raw_path)
+        if p_check.is_file():
+            cache_key = (os.path.normcase(str(p_check.resolve())), p_check.stat().st_mtime)
+            cached_wb = _RAW_WB_CACHE.get(cache_key)
+            if cached_wb is not None:
+                return cached_wb
+    except OSError:
+        cache_key = None
+
     raw_cct: float | None = None
     raw_tint: float | None = None
     exif_cct: float | None = None
@@ -549,7 +763,12 @@ def read_raw_white_balance(raw_path: str | PathLike[str]) -> tuple[float, float]
     temp = exif_cct if exif_cct is not None else (raw_cct if raw_cct is not None else 5500.0)
     tint = exif_tint if exif_tint is not None else (raw_tint if raw_tint is not None else 1.0)
 
-    return float(round(temp, 1)), float(round(tint, 2))
+    result = (float(round(temp, 1)), float(round(tint, 2)))
+    if cache_key is not None:
+        if len(_RAW_WB_CACHE) > 512:
+            _RAW_WB_CACHE.clear()
+        _RAW_WB_CACHE[cache_key] = result
+    return result
 
 
 def _read_exif_metadata(raw_path: str | PathLike[str]) -> ExifData:
@@ -827,6 +1046,100 @@ def _read_exif_metadata(raw_path: str | PathLike[str]) -> ExifData:
     )
 
 
+@functools.lru_cache(maxsize=1)
+def get_available_lenses() -> list[str]:
+    """Return a sorted list of unique lens names available in the lensfun database.
+
+    Each lens name is formatted as '{maker} - {model}'.
+    """
+    try:
+        import lensfunpy
+        db = lensfunpy.Database()
+        names = {
+            f"{l.maker} - {l.model}"
+            for l in getattr(db, "lenses", [])
+            if getattr(l, "maker", None) and getattr(l, "model", None)
+        }
+        return sorted(names)
+    except Exception as exc:
+        logger.warning("Failed to retrieve lensfun lenses: %s", exc)
+        return []
+
+
+def detect_raw_lens(raw_path: str | PathLike[str]) -> tuple[str, str]:
+    """Detect camera and lens from RAW EXIF metadata and lensfun database.
+
+    Returns:
+    --------
+    tuple[str, str]
+        (canonical_name, summary)
+        e.g. ("Canon - Canon EF 50mm f/1.8 STM", "Canon EF 50mm f/1.8 STM @ 50.0mm f/2.8")
+        If no lens is matched in lensfun, returns ("", exif_lens_model_or_empty).
+    """
+    try:
+        exif = _read_exif_metadata(raw_path)
+    except Exception:
+        return "", ""
+
+    if not exif.lens_model.strip():
+        return "", ""
+
+    try:
+        import lensfunpy
+        db = lensfunpy.Database()
+
+        clean_make = _clean_maker_name(exif.make)
+        exact_cameras: list[object] = []
+        for make in (exif.make, clean_make):
+            if make and exif.model:
+                try:
+                    found = db.find_cameras(make, exif.model, loose_search=False)
+                    if found:
+                        exact_cameras = found
+                        break
+                except Exception:
+                    continue
+        camera = exact_cameras[0] if exact_cameras else None
+
+        camera_lenses: list[object] = []
+        if camera is not None:
+            camera_lenses = _find_lens_candidates(db, camera, exif)
+
+        all_lenses = getattr(db, "lenses", [])
+        global_lenses = [
+            l for l in all_lenses
+            if _lens_model_score(getattr(l, "model", ""), exif.lens_model) > (0, 0, 0)
+        ]
+
+        all_candidates: list[object] = []
+        seen: set[tuple[object, ...]] = set()
+        for l in camera_lenses + global_lenses:
+            ident = (
+                _normalize_lens_text(getattr(l, "maker", "")),
+                _normalize_lens_text(getattr(l, "model", "")),
+                getattr(l, "min_focal", None),
+                getattr(l, "max_focal", None),
+                getattr(l, "min_aperture", None),
+                getattr(l, "max_aperture", None),
+            )
+            if ident not in seen:
+                seen.add(ident)
+                all_candidates.append(l)
+
+        if not all_candidates:
+            return "", exif.lens_model
+
+        lens = _select_lens_candidate(all_candidates, exif, camera=camera)
+        canonical = f"{getattr(lens, 'maker', '')} - {getattr(lens, 'model', '')}"
+        focal = exif.focal_length if exif.focal_length > 0 else float(getattr(lens, "min_focal", 50.0) or 50.0)
+        aperture = exif.f_number if exif.f_number > 0 else float(getattr(lens, "min_aperture", 2.8) or 2.8)
+        summary = f"{getattr(lens, 'model', '') or canonical} @ {focal}mm f/{aperture}"
+        return canonical, summary
+    except Exception as exc:
+        logger.debug("Failed to detect lens from RAW: %s", exc)
+        return "", exif.lens_model
+
+
 def _clean_maker_name(maker: object) -> str:
     """Clean company suffixes and normalize maker names for lensfun matching."""
     text = str(maker or "").strip()
@@ -1080,12 +1393,13 @@ def _select_lens_candidate(lenses: list[object], exif_metadata: ExifData, camera
 def _apply_lens_correction(
     rgb: np.ndarray,
     exif_metadata: ExifData,
+    selected_lens: str = "Auto",
 ) -> tuple[np.ndarray, str]:
     """Apply ``lensfun`` lens corrections to the image.
 
     Camera and lens are looked up in the ``lensfun`` database using the
-    supplied EXIF metadata. If either the camera or lens is not found, no
-    correction is applied and the original image is returned.
+    supplied EXIF metadata or manual lens selection. If either the camera or lens
+    is not found, no correction is applied and the original image is returned.
 
     The following corrections are applied in sequence, if supported by the
     identified lens: vignetting, chromatic aberration, distortion,
@@ -1097,6 +1411,8 @@ def _apply_lens_correction(
         Linear ``float32`` RGB image array with shape ``(H, W, 3)``.
     exif_metadata
         Camera and lens metadata read from the RAW file.
+    selected_lens
+        "Auto" to detect lens from EXIF, or "{maker} - {model}" to manually select a lens.
 
     Returns:
     -------
@@ -1108,7 +1424,8 @@ def _apply_lens_correction(
         the ``lensfun`` database.
 
     """
-    if not exif_metadata.lens_model.strip():
+    is_manual = bool(selected_lens and selected_lens != "Auto")
+    if not is_manual and not exif_metadata.lens_model.strip():
         return rgb, ""
 
     db = lensfunpy.Database()
@@ -1130,32 +1447,63 @@ def _apply_lens_correction(
 
     camera = exact_cameras[0] if exact_cameras else None
 
-    # 2. Collect candidate lenses from camera (if exact) and global database
-    camera_lenses: list[object] = []
-    if camera is not None:
-        camera_lenses = _find_lens_candidates(db, camera, exif_metadata)
+    # 2. Collect candidate lenses
+    if is_manual:
+        if " - " in selected_lens:
+            manual_make, manual_model = selected_lens.split(" - ", 1)
+        else:
+            manual_make, manual_model = "", selected_lens
 
-    all_lenses = getattr(db, "lenses", [])
-    global_lenses = [
-        lens for lens in all_lenses
-        if _lens_model_score(getattr(lens, 'model', ''), exif_metadata.lens_model) > (0, 0, 0)
-    ]
+        manual_candidates: list[object] = []
+        if camera is not None:
+            try:
+                manual_candidates = db.find_lenses(camera, manual_make or None, manual_model, loose_search=False)
+            except Exception:
+                manual_candidates = []
+        if not manual_candidates:
+            all_lenses = getattr(db, "lenses", [])
+            manual_candidates = [
+                l for l in all_lenses
+                if (not manual_make or getattr(l, "maker", "").lower() == manual_make.lower())
+                and getattr(l, "model", "").lower() == manual_model.lower()
+            ]
+        if not manual_candidates:
+            manual_candidates = [
+                l for l in getattr(db, "lenses", [])
+                if getattr(l, "model", "").lower() == manual_model.lower()
+            ]
+        if not manual_candidates:
+            manual_candidates = [
+                l for l in getattr(db, "lenses", [])
+                if _lens_model_score(getattr(l, "model", ""), manual_model) > (0, 0, 0)
+            ]
+        all_candidates = manual_candidates
+    else:
+        camera_lenses: list[object] = []
+        if camera is not None:
+            camera_lenses = _find_lens_candidates(db, camera, exif_metadata)
 
-    # Combine and deduplicate lenses preserving order
-    all_candidates: list[object] = []
-    seen: set[tuple[object, ...]] = set()
-    for l in camera_lenses + global_lenses:
-        ident = (
-            _normalize_lens_text(getattr(l, 'maker', '')),
-            _normalize_lens_text(getattr(l, 'model', '')),
-            getattr(l, 'min_focal', None),
-            getattr(l, 'max_focal', None),
-            getattr(l, 'min_aperture', None),
-            getattr(l, 'max_aperture', None),
-        )
-        if ident not in seen:
-            seen.add(ident)
-            all_candidates.append(l)
+        all_lenses = getattr(db, "lenses", [])
+        global_lenses = [
+            lens for lens in all_lenses
+            if _lens_model_score(getattr(lens, 'model', ''), exif_metadata.lens_model) > (0, 0, 0)
+        ]
+
+        # Combine and deduplicate lenses preserving order
+        all_candidates = []
+        seen: set[tuple[object, ...]] = set()
+        for l in camera_lenses + global_lenses:
+            ident = (
+                _normalize_lens_text(getattr(l, 'maker', '')),
+                _normalize_lens_text(getattr(l, 'model', '')),
+                getattr(l, 'min_focal', None),
+                getattr(l, 'max_focal', None),
+                getattr(l, 'min_aperture', None),
+                getattr(l, 'max_aperture', None),
+            )
+            if ident not in seen:
+                seen.add(ident)
+                all_candidates.append(l)
 
     if not all_candidates:
         return rgb, ""
@@ -1208,8 +1556,9 @@ def _apply_lens_correction(
     if aperture <= 0.0:
         aperture = float(getattr(lens, "min_aperture", 2.8) or 2.8)
 
-    lens_label = getattr(lens, 'model', None) or exif_metadata.lens_model or str(lens)
-    lens_info = f"{lens_label} @ {focal}mm f/{aperture}"
+    lens_label = getattr(lens, 'model', None) or (manual_model if is_manual else exif_metadata.lens_model) or str(lens)
+    suffix = " (Manual)" if is_manual else ""
+    lens_info = f"{lens_label} @ {focal}mm f/{aperture}{suffix}"
 
     height, width = rgb.shape[:2]
 
@@ -1396,12 +1745,25 @@ def resolve_raw_path(raw_path: str | PathLike[str]) -> Path | str:
     if p.suffix.lower() == ".dng":
         return raw_path
 
+    cache_key: tuple[str, float] | None = None
+    try:
+        cache_key = (os.path.normcase(str(p.resolve())), p.stat().st_mtime)
+        cached_resolved = _RESOLVED_RAW_CACHE.get(cache_key)
+        if cached_resolved is not None and Path(cached_resolved).is_file():
+            if cached_resolved == str(p):
+                return raw_path
+            return cached_resolved if isinstance(raw_path, str) else Path(cached_resolved)
+    except OSError:
+        cache_key = None
+
     # Check if a converted DNG already exists alongside the file
     for cand_name in (f"{p.stem}.dng", f"{p.stem}.DNG"):
         cand = p.parent / cand_name
         if cand.is_file() and cand.stat().st_size > 0:
             try:
                 if cand.stat().st_mtime >= p.stat().st_mtime:
+                    if cache_key is not None:
+                        _RESOLVED_RAW_CACHE[cache_key] = str(cand)
                     return str(cand) if isinstance(raw_path, str) else cand
             except OSError:
                 return str(cand) if isinstance(raw_path, str) else cand
@@ -1410,13 +1772,62 @@ def resolve_raw_path(raw_path: str | PathLike[str]) -> Path | str:
     try:
         with rawpy.imread(str(raw_path)) as raw:
             raw.unpack()
+            if cache_key is not None:
+                if len(_RESOLVED_RAW_CACHE) > 512:
+                    _RESOLVED_RAW_CACHE.clear()
+                _RESOLVED_RAW_CACHE[cache_key] = str(p)
             return raw_path
     except Exception:
         pass
 
     logger.info("RAW file '%s' is unsupported by LibRaw; converting to DNG-RAW...", p.name)
     dng = convert_raw_to_dng(p)
+    if cache_key is not None:
+        if len(_RESOLVED_RAW_CACHE) > 512:
+            _RESOLVED_RAW_CACHE.clear()
+        _RESOLVED_RAW_CACHE[cache_key] = str(dng)
     return str(dng) if isinstance(raw_path, str) else dng
+
+
+def _crop_to_raw_active_area(rgb: np.ndarray, sizes: object | None) -> np.ndarray:
+    """Crop demosaiced RGB array to LibRaw's active sensor crop area if present.
+
+    Some lossless-compressed RAW formats (such as Sony A7 IV lossless ARW) pad
+    the raw container buffer to tile multiples (e.g. 7168x5120) and record the
+    true active sensor region (e.g. 7008x4672) in ``sizes.crop_width``,
+    ``sizes.crop_height``, ``sizes.crop_left_margin``, and ``sizes.crop_top_margin``.
+    """
+    if sizes is None or rgb.ndim < 2:
+        return rgb
+    ch = int(getattr(sizes, "crop_height", 0) or 0)
+    cw = int(getattr(sizes, "crop_width", 0) or 0)
+    H = int(getattr(sizes, "height", 0) or 0)
+    W = int(getattr(sizes, "width", 0) or 0)
+    if ch <= 0 or cw <= 0 or H <= 0 or W <= 0 or (ch >= H and cw >= W):
+        return rgb
+
+    top_margin = int(getattr(sizes, "top_margin", 0) or 0)
+    left_margin = int(getattr(sizes, "left_margin", 0) or 0)
+    crop_top = int(getattr(sizes, "crop_top_margin", 0) or 0)
+    crop_left = int(getattr(sizes, "crop_left_margin", 0) or 0)
+
+    y0 = max(0, crop_top - top_margin)
+    x0 = max(0, crop_left - left_margin)
+    y1 = min(H, y0 + ch)
+    x1 = min(W, x0 + cw)
+    if y1 <= y0 or x1 <= x0:
+        return rgb
+
+    flip = int(getattr(sizes, "flip", 0) or 0)
+    if flip == 0 and rgb.shape[:2] == (H, W):
+        return rgb[y0:y1, x0:x1]
+    if flip == 3 and rgb.shape[:2] == (H, W):
+        return rgb[H - y1 : H - y0, W - x1 : W - x0]
+    if flip == 5 and rgb.shape[:2] == (W, H):
+        return rgb[W - x1 : W - x0, y0:y1]
+    if flip == 6 and rgb.shape[:2] == (W, H):
+        return rgb[x0:x1, H - y1 : H - y0]
+    return rgb
 
 
 def load_and_process_raw_file(
@@ -1425,6 +1836,7 @@ def load_and_process_raw_file(
     temperature: float | None = None,
     tint: float | None = None,
     lens_correction: bool = False,
+    selected_lens: str = "Auto",
     chroma_denoise: bool = False,
     chroma_denoise_strength: float = 1.0,
     raw_exposure_ev: float = 0.0,
@@ -1496,11 +1908,17 @@ def load_and_process_raw_file(
     )
 
     with rawpy.imread(str(actual_path)) as raw:
-        rgb = raw.postprocess(**params).astype(np.float32) / np.float32(65535.0)
+        raw_post = raw.postprocess(**params)
+        raw_post = _crop_to_raw_active_area(raw_post, getattr(raw, "sizes", None))
+        rgb = raw_post.astype(np.float32) / np.float32(65535.0)
+        del raw_post
 
     if lens_correction:
         exif_metadata = _read_exif_metadata(actual_path)
-        rgb, lens_info = _apply_lens_correction(rgb, exif_metadata)
+        try:
+            rgb, lens_info = _apply_lens_correction(rgb, exif_metadata, selected_lens=selected_lens)
+        except TypeError:
+            rgb, lens_info = _apply_lens_correction(rgb, exif_metadata)
 
         if lens_info_out is not None and lens_info:
             lens_info_out["summary"] = lens_info
@@ -1536,9 +1954,14 @@ def load_and_process_raw_file(
 
 __all__ = [
     'load_and_process_raw_file',
+    'get_available_lenses',
+    'detect_raw_lens',
     'read_raw_white_balance',
     'convert_raw_to_dng',
     'find_dng_converter',
     'is_dng_converter_available',
     'resolve_raw_path',
+    'solve_wb_for_aces_rgb',
+    'calculate_spot_wb',
+    'calculate_auto_wb',
 ]

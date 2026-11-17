@@ -265,3 +265,73 @@ def test_controller_gallery_paste_look_to_multiple_selected(tmp_path: Path, monk
     assert s2.camera.exposure_compensation_ev == 3.5
 
 
+def test_controller_viewport_overlay_lifecycle(tmp_path: Path, monkeypatch):
+    from spektrafilm_gui.napari_layout import ViewportContainer, _build_viewer_panel, set_host_window
+    raw_path = tmp_path / "overlay_test.arw"
+    raw_path.touch()
+
+    viewer = FakeViewer()
+    widgets = create_widget_bundle()
+    apply_gui_state(PROJECT_DEFAULT_GUI_STATE, widgets=widgets)
+    controller = initialize_controller(viewer=viewer, widgets=widgets)
+
+    dummy_viewer_widget = QtWidgets.QWidget()
+    status_bar = QtWidgets.QStatusBar()
+    panel = _build_viewer_panel(dummy_viewer_widget, status_bar)
+    host_window = QtWidgets.QMainWindow()
+    host_window.viewer_panel = panel
+    set_host_window(viewer, host_window)
+
+    overlay_events: list[tuple[str, str, str]] = []
+    real_show = panel.viewport_container.show_loading
+    real_hide = panel.viewport_container.hide_loading
+
+    def record_show(title, detail=""):
+        overlay_events.append(("show", title, detail))
+        real_show(title, detail)
+
+    def record_hide():
+        overlay_events.append(("hide", "", ""))
+        real_hide()
+
+    panel.viewport_container.show_loading = record_show
+    panel.viewport_container.hide_loading = record_hide
+
+    dummy_raw = np.full((10, 10, 3), 0.5, dtype=np.float32)
+    monkeypatch.setattr("spektrafilm_gui.controller.load_and_process_raw_file", lambda *a, **k: dummy_raw)
+    monkeypatch.setattr("spektrafilm.utils.raw_file_processor.resolve_raw_path", lambda p: Path(p))
+
+    # 1. Uncached RAW load shows overlay and then hides it
+    controller.load_raw_image(str(raw_path))
+    assert ("show", "Loading RAW...", "Demosaicing overlay_test.arw...") in overlay_events
+    assert overlay_events[-1] == ("hide", "", "")
+    assert panel.viewport_container._loading_overlay.isHidden()
+
+    # 2. Cached RAW load does NOT show overlay
+    overlay_events.clear()
+    controller.load_raw_image(str(raw_path))
+    assert len(overlay_events) == 0
+
+    # 3. Reprocess RAW shows Reprocessing RAW... overlay
+    overlay_events.clear()
+    controller.reprocess_current_raw()
+    assert ("show", "Reprocessing RAW...", "Demosaicing overlay_test.arw...") in overlay_events
+    assert overlay_events[-1] == ("hide", "", "")
+    assert panel.viewport_container._loading_overlay.isHidden()
+
+    # 4. Import folder shows overlay
+    overlay_events.clear()
+    controller.load_gallery_folder(tmp_path)
+    assert any(ev[0] == "show" and ev[1] == "Importing Photos..." for ev in overlay_events)
+    assert overlay_events[-1] == ("hide", "", "")
+
+    # 5. Add files shows overlay
+    overlay_events.clear()
+    controller.add_gallery_files([raw_path])
+    assert any(ev[0] == "show" and ev[1] == "Importing Photos..." for ev in overlay_events)
+    assert overlay_events[-1] == ("hide", "", "")
+
+    controller._thread_pool.waitForDone(1000)
+
+
+

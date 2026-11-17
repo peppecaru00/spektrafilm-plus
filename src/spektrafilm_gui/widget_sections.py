@@ -61,7 +61,7 @@ from spektrafilm_gui.theme_palette import (
     TEXT_MAIN,
 )
 from spektrafilm_gui.options import RawHighlightMode, RawWhiteBalance
-from spektrafilm_gui.widget_editors import BoolEditor, EnumEditor, FloatEditor, FloatTupleEditor, IntEditor, IntTupleEditor, ProfileEnumEditor
+from spektrafilm_gui.widget_editors import AccentColorSelectorWidget, BoolEditor, EnumEditor, FloatEditor, FloatTupleEditor, IntEditor, IntTupleEditor, LensSelectorWidget, ProfileEnumEditor
 from spektrafilm_gui.widget_primitives import CollapsibleSection, normalize_ui_text as _normalize_ui_text
 
 
@@ -109,6 +109,11 @@ LOAD_RAW_FIELDS = (
         enum=RawHighlightMode,
     ),
     ParamSpec('lens_correction', label='Lens correction', tooltip='Apply lens corrections'),
+    ParamSpec(
+        'selected_lens',
+        label='Lens profile',
+        tooltip='Lensfun profile for lens correction (Auto or manual selection)',
+    ),
     ParamSpec(
         'chroma_denoise',
         label='Chroma denoise',
@@ -296,6 +301,8 @@ def _editor_from_param_spec(annotation: Any, spec: ParamSpec, *, label: str) -> 
     Shared by the group-bound (ParamsGroupSection) and path-bound (input_image)
     sections so the type -> editor mapping lives in one place.
     """
+    if spec.leaf == 'selected_lens':
+        return LensSelectorWidget()
     decimals = 2 if spec.decimals is None else spec.decimals
     if spec.enum is not None:
         if spec.leaf in {'film_stock', 'print_paper'}:
@@ -407,6 +414,8 @@ class InputImageSection(QWidget):
 
 class LoadRawSection(QWidget):
     load_requested = Signal(str)
+    auto_wb_requested = Signal()
+    wb_picker_toggled = Signal(bool)
     SECTION_NAME = 'load_raw'
     TITLE = 'Import Raw'
     _TYPE_HINTS = get_type_hints(LoadRawState)
@@ -416,6 +425,7 @@ class LoadRawSection(QWidget):
         super().__init__()
         self._source: LoadRawState | None = None
         self._detected_wb: tuple[float, float] | None = None
+        self._detected_lens: str | None = None
         self.file_path = QLineEdit()
         self.file_path.setReadOnly(True)
         self.file_path.setPlaceholderText(_normalize_ui_text('No raw selected'))
@@ -426,6 +436,21 @@ class LoadRawSection(QWidget):
             role='compactAction',
         )
         self.reprocess_button.setEnabled(False)
+        self.auto_wb_button = _build_button(
+            'Auto WB',
+            self.auto_wb_requested.emit,
+            tooltip='Automatically calculate neutral white balance and tint from unclipped image midtones',
+            role='compactAction',
+        )
+        self.auto_wb_button.setEnabled(False)
+        self.pipette_button = _build_button(
+            'Pick WB',
+            self._toggle_wb_picker,
+            tooltip='Pick neutral white balance from image: click to activate, then click on a neutral grey or white surface in the viewer (Esc to cancel)',
+            role='compactAction',
+        )
+        self.pipette_button.setCheckable(True)
+        self.pipette_button.setEnabled(False)
         self.convert_dng_button = _build_button(
             'Convert to DNG',
             self._convert_to_dng,
@@ -442,6 +467,9 @@ class LoadRawSection(QWidget):
             setattr(self, field_name, editor)
 
         self.white_balance.currentTextChanged.connect(self._on_white_balance_mode_changed)
+        if hasattr(self, 'lens_correction') and hasattr(self, 'selected_lens'):
+            self.lens_correction.toggled.connect(self._on_lens_correction_toggled)
+            self.selected_lens.setEnabled(self.lens_correction.value)
 
         form = _new_form_layout()
         browse_button = _build_button(
@@ -452,10 +480,40 @@ class LoadRawSection(QWidget):
         )
         form.addRow(_build_vertical_container(_build_button_row(self.file_path, browse_button, spacing=4), spacing=0))
         for field_name in self._STATE_FIELD_NAMES:
+            if field_name == 'selected_lens':
+                continue
             form.addRow(_build_widget_label(self.SECTION_NAME, field_name), getattr(self, field_name))
+            if field_name == 'white_balance':
+                form.addRow(_build_button_row(self.auto_wb_button, self.pipette_button, spacing=4))
+            if field_name == 'lens_correction':
+                form.addRow(self.selected_lens)
         form.addRow(_build_button_row(self.reprocess_button, self.convert_dng_button, spacing=4))
 
         self.setLayout(_build_collapsible_form_section(self.TITLE, form, expanded=False))
+
+    def _toggle_wb_picker(self) -> None:
+        self.wb_picker_toggled.emit(self.pipette_button.isChecked())
+
+    def cancel_wb_picker(self) -> None:
+        if self.pipette_button.isChecked():
+            self.pipette_button.blockSignals(True)
+            self.pipette_button.setChecked(False)
+            self.pipette_button.blockSignals(False)
+
+    def set_white_balance_custom(self, temp: float, tint: float) -> None:
+        self.white_balance.value = 'custom'
+        self.temperature.value = float(temp)
+        self.tint.value = float(tint)
+        self.cancel_wb_picker()
+
+    def _on_lens_correction_toggled(self, checked: bool) -> None:
+        if hasattr(self, 'selected_lens'):
+            self.selected_lens.setEnabled(checked)
+
+    def set_detected_lens(self, lens_name: str | None) -> None:
+        self._detected_lens = lens_name or ""
+        if hasattr(self, 'selected_lens'):
+            self.selected_lens.set_detected_lens(lens_name)
 
     def _on_white_balance_mode_changed(self, mode: str) -> None:
         if mode == 'as_shot':
@@ -495,6 +553,8 @@ class LoadRawSection(QWidget):
         self._source = state
         for field_name in self._STATE_FIELD_NAMES:
             getattr(self, field_name).value = getattr(state, field_name)
+        if hasattr(self, 'selected_lens') and hasattr(state, 'lens_correction'):
+            self.selected_lens.setEnabled(state.lens_correction)
         if state.white_balance == 'as_shot':
             if self._detected_wb is not None:
                 self.temperature.value = self._detected_wb[0]
@@ -514,14 +574,24 @@ class LoadRawSection(QWidget):
             setattr(state, field_name, getattr(self, field_name).value)
         return state
 
-    def set_path(self, path: str) -> None:
+    def set_path(self, path: str, *, detected_wb: tuple[float, float] | None = None, detected_lens: str | None = None) -> None:
         path_changed = self.file_path.text() != path
         self.file_path.setText(path)
         self.reprocess_button.setEnabled(bool(path.strip()))
         ext = Path(path).suffix.lower() if path.strip() else ""
         from spektrafilm_gui.gallery_thumbnails import RAW_EXTENSIONS
-        self.convert_dng_button.setEnabled(bool(path.strip()) and ext in RAW_EXTENSIONS and ext != '.dng')
-        if path_changed or self._detected_wb is None:
+        has_raw = bool(path.strip()) and ext in RAW_EXTENSIONS
+        self.convert_dng_button.setEnabled(has_raw and ext != '.dng')
+        self.auto_wb_button.setEnabled(has_raw)
+        self.pipette_button.setEnabled(has_raw)
+        if not has_raw:
+            self.cancel_wb_picker()
+        if detected_wb is not None:
+            self._detected_wb = detected_wb
+            if self.white_balance.value == 'as_shot':
+                self.temperature.value = float(detected_wb[0])
+                self.tint.value = float(detected_wb[1])
+        elif path_changed or self._detected_wb is None:
             if path.strip() and Path(path).is_file():
                 try:
                     temp, tint = read_raw_white_balance(path)
@@ -533,6 +603,28 @@ class LoadRawSection(QWidget):
                     pass
             else:
                 self._detected_wb = None
+
+        # Update auto-detected lens for the newly selected RAW path
+        if detected_lens is not None:
+            self._detected_lens = detected_lens
+            if hasattr(self, 'selected_lens'):
+                self.selected_lens.set_detected_lens(detected_lens)
+        elif path_changed or self._detected_lens is None:
+            if path.strip() and Path(path).is_file():
+                try:
+                    from spektrafilm.utils.raw_file_processor import detect_raw_lens
+                    _canon, summary = detect_raw_lens(path.strip())
+                    self._detected_lens = summary or _canon or ""
+                    if hasattr(self, 'selected_lens'):
+                        self.selected_lens.set_detected_lens(self._detected_lens)
+                except Exception:
+                    self._detected_lens = ""
+                    if hasattr(self, 'selected_lens'):
+                        self.selected_lens.set_detected_lens(None)
+            else:
+                self._detected_lens = ""
+                if hasattr(self, 'selected_lens'):
+                    self.selected_lens.set_detected_lens(None)
 
     def _convert_to_dng(self) -> None:
         path = self.file_path.text().strip()
@@ -835,6 +927,8 @@ class GuiConfigSection(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        self.accent_selector = AccentColorSelectorWidget()
+
         self.save_current_as_default_button = _build_button(
             'Save current as default',
             self.save_current_as_default_requested.emit,
@@ -850,8 +944,10 @@ class GuiConfigSection(QWidget):
         )
 
         content = _build_vertical_container(
+            self.accent_selector,
             _build_button_row(self.save_current_as_default_button, self.save_current_to_file_button),
             _build_button_row(self.load_from_file_button, self.restore_factory_default_button),
+            spacing=8,
         )
         _set_single_collapsible_layout(self, 'GUI parameters', content, expanded=True)
 
@@ -933,7 +1029,7 @@ class DisplaySection(QWidget):
 
         root = QVBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(int(SIZE_SECTION_STACK_SPACING.removesuffix('px')))
+        root.setSpacing(10)
         root.addWidget(self.compute_section)
         root.addWidget(self.display_section)
         self.setLayout(root)
@@ -1050,6 +1146,8 @@ class SimulationSection(QWidget):
         scan_film_row.addStretch(1)
 
         action_buttons = QWidget()
+        action_buttons.setObjectName('actionBarButtons')
+        action_buttons.setAttribute(QtCore.Qt.WA_StyledBackground, False)
         action_buttons.setLayout(
             _build_button_row(
                 self.preview_button,
@@ -1060,9 +1158,13 @@ class SimulationSection(QWidget):
             ),
         )
 
-        self.bottom_bar = QWidget()
+        self.bottom_bar = QtWidgets.QFrame()
+        self.bottom_bar.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.bottom_bar.setObjectName('actionBar')
+        self.bottom_bar.setProperty('role', 'actionBar')
+        self.bottom_bar.setFrameShape(QtWidgets.QFrame.StyledPanel)
         bottom_bar_layout = QVBoxLayout(self.bottom_bar)
-        bottom_bar_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_bar_layout.setContentsMargins(8, 6, 8, 6)
         bottom_bar_layout.setSpacing(SIZE_FOOTER_ITEM_SPACING)
         bottom_bar_layout.addLayout(scan_film_row)
         bottom_bar_layout.addWidget(action_buttons)

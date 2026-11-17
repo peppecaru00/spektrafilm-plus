@@ -568,3 +568,49 @@ def test_build_main_window_for_app_uses_gray_18_canvas_state() -> None:
     assert captured['panel_args'] == (viewer, widgets)
     assert captured['window_args'][0] is viewer
     assert main_window is fake_main_window
+
+
+def test_startup_splash_screen_progress_and_finish() -> None:
+    from qtpy import QtWidgets
+    from spektrafilm_gui.splash_screen import StartupSplashScreen
+
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    splash = StartupSplashScreen()
+    assert splash.width() == 560
+    assert splash.height() == 330
+
+    splash.set_progress("Building darkroom controls...", 0.42, "Creating film stock modules...")
+    assert splash.status_text == "Building darkroom controls..."
+    assert splash.detail_text == "Creating film stock modules..."
+    assert splash.progress == 0.42
+
+    # Force a paint event onto an offscreen image to verify paintEvent renders without errors
+    img = QtGui.QImage(splash.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+    splash.render(img)
+
+    splash.finish()
+    assert splash.progress == 1.0
+    assert not splash.isVisible()
+
+
+def test_create_app_reports_progress_stages(monkeypatch) -> None:
+    stages: list[tuple[str, float, str]] = []
+    monkeypatch.setattr(app_module, '_background_warmup_started', False)
+    monkeypatch.setattr(app_module, '_background_warmup_scheduled', False)
+    monkeypatch.setattr(app_module, '_background_warmup_pool', None)
+    monkeypatch.setattr(app_module, '_apply_app_palette', lambda: None)
+    monkeypatch.setattr(app_module, '_create_viewer', lambda: object())
+    monkeypatch.setattr(app_module, '_create_widgets', lambda: SimpleNamespace())
+    monkeypatch.setattr(app_module, 'load_default_gui_state', lambda: object())
+    monkeypatch.setattr(app_module, 'apply_gui_state', lambda state, *, widgets: None)
+    monkeypatch.setattr(app_module, 'initialize_controller', lambda *, viewer, widgets: object())
+    monkeypatch.setattr(app_module, 'build_main_window_for_app', lambda *, viewer, widgets, controller=None: object())
+    monkeypatch.setattr(app_module, '_warmup_launch_input_path', lambda state: None)
+    monkeypatch.setattr(app_module, '_schedule_background_warmup', lambda: None)
+
+    app_module.create_app(progress_callback=lambda s, p, d: stages.append((s, p, d)))
+
+    assert len(stages) >= 5
+    assert stages[0][1] < stages[-1][1]
+    assert any("viewport" in s[0].lower() for s in stages)
+    assert any("darkroom" in s[0].lower() for s in stages)

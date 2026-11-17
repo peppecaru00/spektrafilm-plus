@@ -225,6 +225,10 @@ def connect_auto_preview_signals(controller: GuiController, widgets: WidgetBundl
 def connect_controller_signals(controller: GuiController, widgets: WidgetBundle) -> None:
     widgets.filepicker.load_requested.connect(controller.load_input_image)
     widgets.load_raw.load_requested.connect(controller.load_raw_image)
+    if hasattr(widgets.load_raw, 'auto_wb_requested'):
+        widgets.load_raw.auto_wb_requested.connect(controller.run_auto_white_balance)
+    if hasattr(widgets.load_raw, 'wb_picker_toggled'):
+        widgets.load_raw.wb_picker_toggled.connect(controller.toggle_wb_picker)
 
     widgets.simulation.film_stock.textActivated.connect(controller.apply_profile_defaults)
     widgets.simulation.print_paper.textActivated.connect(controller.apply_profile_defaults)
@@ -405,14 +409,35 @@ def build_main_window_for_app(
     return main_window
 
 
-def create_app() -> GuiApp:
+def create_app(
+    *,
+    progress_callback: Callable[[str, float, str], None] | None = None,
+) -> GuiApp:
+    def _report(status: str, pct: float, detail: str) -> None:
+        if progress_callback is not None:
+            try:
+                progress_callback(status, pct, detail)
+            except Exception:
+                pass
+
+    _report("Initializing viewport engine...", 0.15, "Loading Napari & VisPy OpenGL canvas...")
     viewer = _create_viewer()
     _apply_app_palette()
+
+    _report("Building darkroom controls...", 0.38, "Creating film stock, enlarger, and scanner modules...")
     widgets = _create_widgets()
+
+    _report("Loading user configuration...", 0.55, "Restoring default parameters and profiles...")
     gui_state = load_default_gui_state()
     apply_gui_state(gui_state, widgets=widgets)
+
+    _report("Warming up color science pipeline...", 0.72, "Initializing ACES & ICC color management...")
     _warmup_launch_input_path(gui_state)
+
+    _report("Connecting runtime controller...", 0.85, "Binding filmstrip, cache, and simulation services...")
     controller = initialize_controller(viewer=viewer, widgets=widgets)
+
+    _report("Assembling studio workspace...", 0.95, "Preparing main window and GPU compute engine...")
     main_window = build_main_window_for_app(viewer=viewer, widgets=widgets, controller=controller)
     _schedule_background_warmup()
     return GuiApp(
@@ -422,12 +447,53 @@ def create_app() -> GuiApp:
         main_window=main_window,
     )
 
-def main():
-    napari = import_module('napari')
-    app = create_app()
-    show_viewer_window(app.viewer)
+
+def main(*, splash: Any | None = None) -> None:
+    if splash is None:
+        try:
+            import sys
+            from spektrafilm_gui.icons import get_app_icon
+            from spektrafilm_gui.splash_screen import StartupSplashScreen
+            qapp = QtWidgets.QApplication.instance()
+            if qapp is None:
+                qapp = QtWidgets.QApplication(sys.argv)
+                qapp.setApplicationName("SpektraFilm Plus")
+                qapp.setOrganizationName("IanoLiotta")
+                qapp.setApplicationVersion("0.1.0")
+                icon = get_app_icon()
+                if not icon.isNull():
+                    qapp.setWindowIcon(icon)
+            splash = StartupSplashScreen()
+            splash.show()
+            splash.set_progress("Starting SpektraFilm Plus...", 0.08, "Loading core runtime libraries...")
+        except Exception:
+            splash = None
+
+    progress_cb = getattr(splash, "set_progress", None) if splash is not None else None
+    try:
+        napari = import_module('napari')
+        if callable(progress_cb):
+            app = create_app(progress_callback=progress_cb)
+        else:
+            app = create_app()
+        show_viewer_window(app.viewer)
+    finally:
+        if splash is not None:
+            finish_fn = getattr(splash, "finish", None)
+            if callable(finish_fn):
+                try:
+                    finish_fn(getattr(locals().get("app"), "main_window", None))
+                except Exception:
+                    splash.close()
+            elif hasattr(splash, "close"):
+                splash.close()
+    # Let preview/prefetch/export workers finish before Python tears down Qt and CUDA.
+    qapp = QtWidgets.QApplication.instance()
+    if qapp is not None:
+        qapp.aboutToQuit.connect(lambda: QtCore.QThreadPool.globalInstance().waitForDone(5000))
     napari.run()
 
 
 if __name__ == "__main__":
     main()
+

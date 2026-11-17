@@ -52,6 +52,7 @@ class LoadRawState:
     raw_exposure_ev: float = 0.0
     highlight_recovery: float = 1.0
     highlight_mode: str = "reconstruct"
+    selected_lens: str = "Auto"
 
 
 @dataclass(slots=True)
@@ -341,6 +342,7 @@ def gui_state_from_params(
                 raw_exposure_ev=0.0,
                 highlight_recovery=1.0,
                 highlight_mode='reconstruct',
+                selected_lens='Auto',
             ),
             display=DisplayState(
                 use_display_transform=True,

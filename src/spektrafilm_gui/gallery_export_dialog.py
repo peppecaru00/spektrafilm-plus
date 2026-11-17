@@ -156,7 +156,25 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         cancel_btn.clicked.connect(self.reject)
 
         self.start_btn = QtWidgets.QPushButton("🚀 Start Scan & Save")
-        self.start_btn.setStyleSheet(f"background-color: {ACCENT_COLOR_TEXT}; color: #000; font-weight: {FONT_WEIGHT_SEMIBOLD}; padding: 6px 14px; border-radius: 6px;")
+        self.start_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ACCENT_COLOR_TEXT};
+                color: #000000;
+                font-weight: {FONT_WEIGHT_SEMIBOLD};
+                padding: 6px 14px;
+                border-radius: 6px;
+                border: 1px solid transparent;
+            }}
+            QPushButton:hover {{
+                background-color: #ffffff;
+                color: #000000;
+                border-color: #ffffff;
+            }}
+            QPushButton:pressed {{
+                background-color: {GRAY_3};
+                color: {TEXT_HI};
+            }}
+        """)
         self.start_btn.clicked.connect(self._on_start)
 
         btn_box.addWidget(cancel_btn)
@@ -324,6 +342,7 @@ class BatchExportWorker(QRunnable):
                         temperature=load_raw.temperature,
                         tint=load_raw.tint,
                         lens_correction=load_raw.lens_correction,
+                        selected_lens=getattr(load_raw, "selected_lens", "Auto"),
                         chroma_denoise=load_raw.chroma_denoise,
                         chroma_denoise_strength=load_raw.chroma_denoise_strength,
                         raw_exposure_ev=getattr(load_raw, "raw_exposure_ev", 0.0),

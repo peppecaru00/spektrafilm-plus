@@ -130,7 +130,7 @@ class SimulationPipeline:
             self._last_elapsed_time = perf_counter() - start
             if self.device == "cuda":
                 from spektrafilm.cuda.device import free_memory
-                free_memory()
+                free_memory(clear_fft_plans=False)
 
     def get_timings(self):
         return self.timings

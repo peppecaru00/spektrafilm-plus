@@ -21,6 +21,7 @@ class SimulationRequest:
     params: object
     output_color_space: str
     use_display_transform: bool
+    input_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -31,6 +32,7 @@ class SimulationResult:
     output_color_space: str
     use_display_transform: bool
     status_message: str
+    input_path: str | None = None
 
 
 class SimulationWorkerSignals(QObject):
@@ -48,10 +50,16 @@ class SimulationWorker(QRunnable):
     def run(self) -> None:
         try:
             result = self._execute_request(self._request)
-        except (AttributeError, LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            self.signals.failed.emit(f'{type(exc).__name__}: {exc}')
+        except Exception as exc:
+            try:
+                self.signals.failed.emit(f'{type(exc).__name__}: {exc}')
+            except RuntimeError:
+                pass
             return
-        self.signals.finished.emit(result)
+        try:
+            self.signals.finished.emit(result)
+        except RuntimeError:
+            pass
 
 
 def normalized_image_data(image: np.ndarray) -> np.ndarray:
@@ -231,4 +239,5 @@ def execute_simulation_request(
         output_color_space=request.output_color_space,
         use_display_transform=request.use_display_transform,
         status_message=display_status,
+        input_path=request.input_path,
     )

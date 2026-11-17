@@ -113,3 +113,22 @@ BOOL_EDITOR_CHECKED_DISABLED = GRAY_4
 BOOL_EDITOR_BORDER_CHECKED = ACCENT_COLOR_TEXT
 BOOL_EDITOR_BORDER_UNCHECKED = GRAY_4
 BOOL_EDITOR_CHECKMARK = '#000000'
+
+
+ACCENT_PRESETS: list[tuple[str, str]] = [
+    ("Amber", "#ee9470"),
+    ("Cyan", "#63c3cf"),
+    ("Emerald", "#10b981"),
+    ("Halation", "#f43f5e"),
+    ("Cobalt", "#3b82f6"),
+    ("Amethyst", "#a855f7"),
+    ("Gold", "#eab308"),
+]
+
+
+# Section Card styling tokens
+CARD_BG = '#222222'
+CARD_BORDER = '#363636'
+CARD_HEADER_BG = '#2a2a2a'
+CARD_HEADER_HOVER = '#323232'
+CARD_HEADER_BORDER = '#2d2d2d'

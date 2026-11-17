@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Callable
 from typing import Any, cast
 
 from qtpy import QtGui, QtWidgets
-from qtpy.QtCore import QRectF, Qt
+from qtpy.QtCore import QRectF, QTimer, Qt
 
 if TYPE_CHECKING:
     import napari
@@ -23,6 +23,8 @@ QWidget = QtWidgets.QWidget
 from spektrafilm_gui.icons import get_app_icon
 from spektrafilm_gui.theme import APP_STYLE_SHEET
 from spektrafilm_gui.theme_palette import (
+    ACCENT_COLOR_TEXT,
+    FONT_WEIGHT_BOLD,
     GRAY_0,
     GRAY_3,
     GRAY_18,
@@ -36,6 +38,8 @@ from spektrafilm_gui.theme_palette import (
     SIZE_PANEL_MARGIN,
     SIZE_SPLITTER_HANDLE_MARGIN_LEFT,
     SIZE_TAB_CONTENT_TOP_MARGIN,
+    TEXT_DIM,
+    TEXT_HI,
 )
 from spektrafilm_gui.widgets import WidgetBundle
 from spektrafilm_gui.widgets import CollapsibleSection, platform_default_font
@@ -148,22 +152,42 @@ def configure_napari_chrome(viewer: napari.Viewer, *, gray_18_canvas: bool = Tru
         layer_list.hide()
 
 
+_HOST_WINDOWS_BY_VIEWER_ID: dict[int, QWidget] = {}
+
+
 def set_host_window(viewer: napari.Viewer, host_window: QWidget) -> None:
+    if viewer is not None:
+        _HOST_WINDOWS_BY_VIEWER_ID[id(viewer)] = host_window
+        try:
+            setattr(viewer, '_agx_host_window', host_window)
+        except (AttributeError, TypeError, ValueError):
+            pass
     viewer_window = getattr(viewer, 'window', None)
     if viewer_window is not None:
-        setattr(viewer_window, '_agx_host_window', host_window)
+        try:
+            setattr(viewer_window, '_agx_host_window', host_window)
+        except (AttributeError, TypeError, ValueError):
+            pass
 
 
 def _host_window(viewer: napari.Viewer) -> QWidget | None:
-    viewer_window = getattr(viewer, 'window', None)
-    if viewer_window is None:
+    if viewer is None:
         return None
-    host_window = getattr(viewer_window, '_agx_host_window', None)
-    if host_window is not None:
-        return host_window
-    qt_window = getattr(viewer_window, '_qt_window', None)
-    if qt_window is not None:
-        return qt_window
+    viewer_window = getattr(viewer, 'window', None)
+    if viewer_window is not None:
+        host_window = getattr(viewer_window, '_agx_host_window', None)
+        if host_window is not None:
+            return host_window
+    direct_host = getattr(viewer, '_agx_host_window', None)
+    if direct_host is not None:
+        return direct_host
+    mapped_host = _HOST_WINDOWS_BY_VIEWER_ID.get(id(viewer))
+    if mapped_host is not None:
+        return mapped_host
+    if viewer_window is not None:
+        qt_window = getattr(viewer_window, '_qt_window', None)
+        if qt_window is not None:
+            return qt_window
     return None
 
 
@@ -245,7 +269,8 @@ def _build_sidebar(controls_panel: QWidget) -> QFrame:
 def _build_controls_tab(*widgets: QWidget) -> QWidget:
     tab = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(tab)
-    layout.setContentsMargins(0, SIZE_TAB_CONTENT_TOP_MARGIN, 0, 0)
+    layout.setContentsMargins(6, SIZE_TAB_CONTENT_TOP_MARGIN, 6, 10)
+    layout.setSpacing(10)
     layout.setAlignment(Qt.AlignTop)
     for widget in widgets:
         layout.addWidget(widget)
@@ -392,6 +417,133 @@ class ViewportRoundedOverlay(QtWidgets.QWidget):
             painter.end()
 
 
+class LoadingSpinner(QtWidgets.QWidget):
+    """Smooth animated rotating ring spinner in SpektraFilm accent color."""
+
+    def __init__(self, size: int = 36, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._size = size
+        self._angle: float = 0.0
+        self.setFixedSize(size, size)
+        self._timer = QTimer(self)
+        self._timer.setInterval(25)
+        self._timer.timeout.connect(self._on_tick)
+
+    def _on_tick(self) -> None:
+        self._angle = (self._angle + 10.0) % 360.0
+        self.update()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        try:
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            w = float(self.width())
+            h = float(self.height())
+            stroke_width = 3.2
+            inset = stroke_width / 2.0 + 1.0
+            rect = QRectF(inset, inset, w - 2 * inset, h - 2 * inset)
+
+            track_pen = QtGui.QPen(QtGui.QColor(GRAY_3), stroke_width)
+            track_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(track_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(rect)
+
+            arc_pen = QtGui.QPen(QtGui.QColor(ACCENT_COLOR_TEXT), stroke_width)
+            arc_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(arc_pen)
+            span_angle = int(100 * 16)
+            start_angle = int(-self._angle * 16)
+            painter.drawArc(rect, start_angle, span_angle)
+        finally:
+            painter.end()
+
+
+class ViewportLoadingOverlay(QtWidgets.QWidget):
+    """Centered HUD loading card displayed over the viewport during operations."""
+
+    def __init__(self, parent: QtWidgets.QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+        outer_layout = QtWidgets.QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setAlignment(Qt.AlignCenter)
+
+        self._card = QtWidgets.QFrame(self)
+        self._card.setObjectName("viewportLoadingCard")
+        self._card.setStyleSheet(
+            f"""
+            QFrame#viewportLoadingCard {{
+                background-color: rgba(18, 18, 18, 0.94);
+                border: 1px solid {GRAY_3};
+                border-radius: 10px;
+            }}
+            """
+        )
+
+        card_layout = QtWidgets.QVBoxLayout(self._card)
+        card_layout.setContentsMargins(28, 22, 28, 22)
+        card_layout.setSpacing(12)
+        card_layout.setAlignment(Qt.AlignCenter)
+
+        self._spinner = LoadingSpinner(size=36, parent=self._card)
+        card_layout.addWidget(self._spinner, 0, Qt.AlignCenter)
+
+        text_layout = QtWidgets.QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(4)
+        text_layout.setAlignment(Qt.AlignCenter)
+
+        self._title_label = QtWidgets.QLabel("Loading RAW...", self._card)
+        self._title_label.setAlignment(Qt.AlignCenter)
+        self._title_label.setStyleSheet(
+            f"color: {TEXT_HI}; font-size: 13px; font-weight: {FONT_WEIGHT_BOLD}; background: transparent; border: none;"
+        )
+        text_layout.addWidget(self._title_label)
+
+        self._detail_label = QtWidgets.QLabel("", self._card)
+        self._detail_label.setAlignment(Qt.AlignCenter)
+        self._detail_label.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 11px; background: transparent; border: none;"
+        )
+        self._detail_label.hide()
+        text_layout.addWidget(self._detail_label)
+
+        card_layout.addLayout(text_layout)
+        outer_layout.addWidget(self._card, 0, Qt.AlignCenter)
+        self.hide()
+
+    def set_text(self, title: str, detail: str = "") -> None:
+        self._title_label.setText(title)
+        if detail:
+            self._detail_label.setText(detail)
+            self._detail_label.show()
+        else:
+            self._detail_label.setText("")
+            self._detail_label.hide()
+        self._card.adjustSize()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        try:
+            painter.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 90))
+        finally:
+            painter.end()
+
+
 class ViewportContainer(QtWidgets.QFrame):
     """Container frame wrapping the viewer widget with an internal rounded border."""
 
@@ -416,16 +568,36 @@ class ViewportContainer(QtWidgets.QFrame):
         self._overlay = ViewportRoundedOverlay(self, radius=radius)
         self._overlay.setGeometry(self.rect())
 
+        self._loading_overlay = ViewportLoadingOverlay(self)
+        self._loading_overlay.setGeometry(self.rect())
+
+    def show_loading(self, title: str, detail: str = "") -> None:
+        self._loading_overlay.set_text(title, detail)
+        self._loading_overlay.setGeometry(self.rect())
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
+        QtWidgets.QApplication.processEvents()
+
+    def hide_loading(self) -> None:
+        self._loading_overlay.hide()
+        QtWidgets.QApplication.processEvents()
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._overlay.setGeometry(self.rect())
         self._overlay.raise_()
+        self._loading_overlay.setGeometry(self.rect())
+        if self._loading_overlay.isVisible():
+            self._loading_overlay.raise_()
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
         _strip_viewer_margins(self.viewer_widget)
         self._overlay.setGeometry(self.rect())
         self._overlay.raise_()
+        self._loading_overlay.setGeometry(self.rect())
+        if self._loading_overlay.isVisible():
+            self._loading_overlay.raise_()
 
 
 def _build_viewer_panel(
@@ -448,7 +620,7 @@ def _build_viewer_panel(
 
     status_container = QtWidgets.QWidget()
     status_layout = QtWidgets.QHBoxLayout(status_container)
-    status_layout.setContentsMargins(0, 0, 0, 0)
+    status_layout.setContentsMargins(0, 1, 0, 1)
     status_layout.setSpacing(SIZE_FOOTER_ITEM_SPACING)
     status_bar.setContentsMargins(0, 0, 0, 0)
     status_bar.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -500,7 +672,7 @@ def _build_viewer_panel(
     home_button.setObjectName('homeViewButton')
     if on_home_view is not None:
         home_button.clicked.connect(on_home_view)
-    row_height = int(SIZE_FOOTER_MIN_HEIGHT.removesuffix('px'))
+    row_height = 26
     undo_button.setFixedHeight(row_height)
     redo_button.setFixedHeight(row_height)
     rotate_ccw_button.setFixedHeight(row_height)
@@ -510,7 +682,7 @@ def _build_viewer_panel(
     zoom_400_button.setFixedHeight(row_height)
     home_button.setFixedHeight(row_height)
     status_bar.setFixedHeight(row_height)
-    status_container.setFixedHeight(row_height)
+    status_container.setFixedHeight(row_height + 2)
     gpu_badge = QLabel()
     gpu_badge.setObjectName('gpuBadge')
     gpu_badge.setFixedHeight(row_height)
@@ -562,7 +734,7 @@ def _build_viewer_panel(
     status_layout.addWidget(home_button)
 
     layout = QtWidgets.QVBoxLayout(panel)
-    layout.setContentsMargins(SIZE_PANEL_MARGIN, SIZE_PANEL_MARGIN, divider_gap, SIZE_FOOTER_BOTTOM_INSET)
+    layout.setContentsMargins(SIZE_PANEL_MARGIN, SIZE_PANEL_MARGIN, divider_gap, max(8, SIZE_FOOTER_BOTTOM_INSET))
     layout.setSpacing(0)
     if isinstance(viewer_widget, QWidget):
         viewport_container = ViewportContainer(viewer_widget, radius=RADIUS_CARD_NUM, parent=panel)
@@ -681,6 +853,8 @@ def build_main_window(
     splitter.setChildrenCollapsible(False)
     splitter.setHandleWidth(4)
     if gallery_widget is not None:
+        gallery_widget.setMinimumWidth(220)
+        gallery_widget.setMaximumWidth(450)
         splitter.addWidget(gallery_widget)
     viewer_panel = _build_viewer_panel(
         viewer_widget,
@@ -694,11 +868,15 @@ def build_main_window(
         on_undo=on_undo,
         on_redo=on_redo,
     )
+    viewer_panel.setMinimumWidth(450)
     main_window.viewer_panel = viewer_panel
     main_window.undo_button = getattr(viewer_panel, 'undo_button', None)
     main_window.redo_button = getattr(viewer_panel, 'redo_button', None)
     splitter.addWidget(viewer_panel)
-    splitter.addWidget(_build_sidebar(controls_panel))
+    sidebar = _build_sidebar(controls_panel)
+    sidebar.setMinimumWidth(380)
+    sidebar.setMaximumWidth(520)
+    splitter.addWidget(sidebar)
     if gallery_widget is not None:
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -752,3 +930,34 @@ def show_viewer_window(viewer: napari.Viewer) -> None:
         if window.isVisible():
             window.showMaximized()
             return
+
+
+def _find_viewport_container(viewer: napari.Viewer | None) -> ViewportContainer | None:
+    if viewer is None:
+        return None
+    host_window = _host_window(viewer)
+    if host_window is not None:
+        viewer_panel = getattr(host_window, 'viewer_panel', None)
+        if viewer_panel is not None:
+            container = getattr(viewer_panel, 'viewport_container', None)
+            if container is not None and isinstance(container, ViewportContainer):
+                return container
+        find_child = getattr(host_window, 'findChild', None)
+        if callable(find_child):
+            found = find_child(ViewportContainer)
+            if found is not None:
+                return found
+    return None
+
+
+def show_viewport_overlay(viewer: napari.Viewer | None, title: str, detail: str = "") -> None:
+    container = _find_viewport_container(viewer)
+    if container is not None:
+        container.show_loading(title, detail)
+
+
+def hide_viewport_overlay(viewer: napari.Viewer | None) -> None:
+    container = _find_viewport_container(viewer)
+    if container is not None:
+        container.hide_loading()
+

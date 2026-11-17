@@ -449,3 +449,109 @@ def test_strip_viewer_margins_clears_canvas_ancestor_margins() -> None:
     container.showEvent(QtGui.QShowEvent())
     assert root_layout.contentsMargins().left() == 0
 
+
+def test_loading_spinner_and_viewport_loading_overlay() -> None:
+    from qtpy import QtCore, QtGui, QtWidgets
+    from qtpy.QtCore import Qt
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from spektrafilm_gui.napari_layout import (
+        LoadingSpinner,
+        ViewportContainer,
+        ViewportLoadingOverlay,
+        hide_viewport_overlay,
+        show_viewport_overlay,
+    )
+
+    spinner = LoadingSpinner(size=36)
+    assert spinner.width() == 36
+    assert spinner.height() == 36
+    init_angle = spinner._angle
+    spinner._on_tick()
+    assert spinner._angle > init_angle
+
+    dummy_parent = QtWidgets.QWidget()
+    overlay = ViewportLoadingOverlay(dummy_parent)
+    assert overlay.testAttribute(Qt.WA_TransparentForMouseEvents)
+    assert not overlay.isVisible()
+
+    overlay.set_text("Loading RAW...", "Demosaicing photo.arw...")
+    assert overlay._title_label.text() == "Loading RAW..."
+    assert overlay._detail_label.text() == "Demosaicing photo.arw..."
+    assert not overlay._detail_label.isHidden()
+
+    overlay.set_text("Reprocessing RAW...")
+    assert overlay._title_label.text() == "Reprocessing RAW..."
+    assert overlay._detail_label.isHidden()
+
+    content_widget = QtWidgets.QWidget()
+    container = ViewportContainer(content_widget)
+    container.resize(800, 600)
+    container.show()
+
+    assert hasattr(container, '_loading_overlay')
+    assert isinstance(container._loading_overlay, ViewportLoadingOverlay)
+    assert container._loading_overlay.isHidden()
+
+    container.show_loading("Importing Photos...", "Scanning folder...")
+    assert not container._loading_overlay.isHidden()
+    assert container._loading_overlay.size() == container.size()
+    assert container._loading_overlay._title_label.text() == "Importing Photos..."
+
+    container.hide_loading()
+    assert container._loading_overlay.isHidden()
+
+
+def test_show_and_hide_viewport_overlay_helpers() -> None:
+    from qtpy import QtWidgets
+    from types import SimpleNamespace
+    from spektrafilm_gui.napari_layout import (
+        ViewportContainer,
+        _build_viewer_panel,
+        hide_viewport_overlay,
+        set_host_window,
+        show_viewport_overlay,
+    )
+
+    # Safe with None viewer
+    show_viewport_overlay(None, "Loading...")
+    hide_viewport_overlay(None)
+
+    # Safe with fake viewer lacking host window
+    fake_viewer = SimpleNamespace(window=SimpleNamespace())
+    show_viewport_overlay(fake_viewer, "Loading...")
+    hide_viewport_overlay(fake_viewer)
+
+    # With proper host window and viewer panel
+    dummy_viewer_widget = QtWidgets.QWidget()
+    status_bar = QtWidgets.QStatusBar()
+    panel = _build_viewer_panel(dummy_viewer_widget, status_bar)
+
+    host_window = QtWidgets.QMainWindow()
+    host_window.viewer_panel = panel
+    set_host_window(fake_viewer, host_window)
+
+    show_viewport_overlay(fake_viewer, "Reprocessing RAW...", "Processing DSC0001.ARW")
+    assert not panel.viewport_container._loading_overlay.isHidden()
+    assert panel.viewport_container._loading_overlay._title_label.text() == "Reprocessing RAW..."
+    assert panel.viewport_container._loading_overlay._detail_label.text() == "Processing DSC0001.ARW"
+
+    hide_viewport_overlay(fake_viewer)
+    assert panel.viewport_container._loading_overlay.isHidden()
+
+    # Regression test: strict viewer object (like napari.Viewer Pydantic model) that raises ValueError on setattr
+    class StrictViewer:
+        def __init__(self) -> None:
+            object.__setattr__(self, "window", SimpleNamespace())
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise ValueError(f'"{self.__class__.__name__}" object has no field "{name}"')
+
+    strict_viewer = StrictViewer()
+    set_host_window(strict_viewer, host_window)
+    show_viewport_overlay(strict_viewer, "Strict Viewer Test")
+    assert not panel.viewport_container._loading_overlay.isHidden()
+    hide_viewport_overlay(strict_viewer)
+    assert panel.viewport_container._loading_overlay.isHidden()
+
+
+

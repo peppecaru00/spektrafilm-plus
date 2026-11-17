@@ -82,11 +82,9 @@ class ScanningStage:
             from spektrafilm.cuda.gamut_compression import cuda_compress_rgb
             m = get_xyz_to_rgb_matrix(self._io.output_color_space, tuple(illuminant_xy), cat="CAT02")
             rgb = cuda_apply_matrix(xyz, m)
-            is_preview = getattr(self._settings, "preview_mode", False)
             rgb = cuda_compress_rgb(
                 rgb, self._io.output_gamut_compress,
                 output_color_space=self._io.output_color_space,
-                preview_mode=is_preview,
             )
         else:
             rgb = colour.XYZ_to_RGB(

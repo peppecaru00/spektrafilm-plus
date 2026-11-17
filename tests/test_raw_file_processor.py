@@ -894,3 +894,87 @@ def test_read_raw_white_balance_from_exif_wb_levels(monkeypatch, tmp_path):
 
 
 
+
+
+def test_crop_to_raw_active_area_sony_arw():
+    """Verify that Sony ARW tile-padded buffers are cropped to active sensor region."""
+    from spektrafilm.utils.raw_file_processor import _crop_to_raw_active_area
+    from types import SimpleNamespace
+
+    # Synthetic Sony A7 IV dimensions
+    sizes_landscape = SimpleNamespace(
+        raw_height=5120, raw_width=7168,
+        height=5120, width=7168,
+        top_margin=0, left_margin=0,
+        flip=0,
+        crop_top_margin=8, crop_left_margin=12,
+        crop_height=4672, crop_width=7008,
+    )
+    raw_buffer_landscape = np.ones((5120, 7168, 3), dtype=np.float32)
+    cropped_land = _crop_to_raw_active_area(raw_buffer_landscape, sizes_landscape)
+    assert cropped_land.shape == (4672, 7008, 3)
+
+    sizes_portrait = SimpleNamespace(
+        raw_height=5120, raw_width=7168,
+        height=5120, width=7168,
+        top_margin=0, left_margin=0,
+        flip=6,
+        crop_top_margin=8, crop_left_margin=12,
+        crop_height=4672, crop_width=7008,
+    )
+    raw_buffer_portrait = np.ones((7168, 5120, 3), dtype=np.float32)
+    cropped_port = _crop_to_raw_active_area(raw_buffer_portrait, sizes_portrait)
+    assert cropped_port.shape == (7008, 4672, 3)
+
+
+
+def test_solve_wb_for_aces_rgb_neutral():
+    from spektrafilm.utils.raw_file_processor import solve_wb_for_aces_rgb
+    t, tint = solve_wb_for_aces_rgb([1.0, 1.0, 1.0], current_temp=5500.0, current_tint=1.0)
+    assert abs(t - 5500.0) < 50.0
+    assert abs(tint - 1.0) < 0.05
+
+
+def test_solve_wb_for_aces_rgb_warm_and_cool():
+    from spektrafilm.utils.raw_file_processor import solve_wb_for_aces_rgb
+    t_warm, tint_warm = solve_wb_for_aces_rgb([0.8, 0.5, 0.3], current_temp=5500.0, current_tint=1.0)
+    assert t_warm < 5000.0
+
+    t_cool, tint_cool = solve_wb_for_aces_rgb([0.3, 0.5, 0.8], current_temp=5500.0, current_tint=1.0)
+    assert t_cool > 6000.0
+
+
+def test_solve_wb_for_aces_rgb_green_and_magenta():
+    from spektrafilm.utils.raw_file_processor import solve_wb_for_aces_rgb
+    t_green, tint_green = solve_wb_for_aces_rgb([0.5, 0.7, 0.5], current_temp=5500.0, current_tint=1.0)
+    assert tint_green < 1.0
+
+    t_mag, tint_mag = solve_wb_for_aces_rgb([0.5, 0.3, 0.5], current_temp=5500.0, current_tint=1.0)
+    assert tint_mag > 1.0
+
+
+def test_solve_wb_for_aces_rgb_edge_cases():
+    from spektrafilm.utils.raw_file_processor import solve_wb_for_aces_rgb
+    assert solve_wb_for_aces_rgb([0.0, 0.0, 0.0], 5200.0, 1.05) == (5200.0, 1.05)
+    assert solve_wb_for_aces_rgb([np.nan, 1.0, 1.0], 5200.0, 1.05) == (5200.0, 1.05)
+    assert solve_wb_for_aces_rgb([np.inf, 1.0, 1.0], 5200.0, 1.05) == (5200.0, 1.05)
+
+
+def test_calculate_spot_wb():
+    from spektrafilm.utils.raw_file_processor import calculate_spot_wb
+    img = np.full((100, 100, 3), 0.5, dtype=np.float32)
+    img[45:55, 45:55, 0] = 0.8
+    img[45:55, 45:55, 1] = 0.5
+    img[45:55, 45:55, 2] = 0.3
+    t, tint = calculate_spot_wb(img, 50, 50, current_temp=5500.0, current_tint=1.0, patch_radius=3)
+    assert t < 5000.0
+
+
+def test_calculate_auto_wb():
+    from spektrafilm.utils.raw_file_processor import calculate_auto_wb
+    img = np.full((200, 200, 3), 0.5, dtype=np.float32)
+    img[..., 0] = 0.7
+    img[..., 1] = 0.5
+    img[..., 2] = 0.3
+    t, tint = calculate_auto_wb(img, current_temp=5500.0, current_tint=1.0)
+    assert t < 5000.0

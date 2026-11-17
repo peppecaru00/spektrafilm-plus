@@ -48,7 +48,8 @@ class FilmingStage:
                 self._io.input_cctf_decoding,
                 method=self._camera.auto_exposure_method,
             )
-            return image * 2 ** autoexposure_ev
+            # Python float keeps the image dtype; a np.float64 scalar would upcast float32 to float64.
+            return image * float(2 ** autoexposure_ev)
         return image
 
     def expose(self, image: np.ndarray) -> np.ndarray:

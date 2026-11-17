@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from importlib import import_module
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -54,7 +55,14 @@ from spektrafilm_gui.gallery_params import (
 from spektrafilm_gui.gallery_sync_dialog import SyncParameterDialog
 from spektrafilm_gui.history_manager import HistoryManager
 from spektrafilm_gui.state import PROJECT_DEFAULT_GUI_STATE, clone_gui_state, digest_after_selection, gui_state_from_params
-from spektrafilm_gui.napari_layout import dialog_parent, reset_viewer_camera, set_canvas_background, set_status
+from spektrafilm_gui.napari_layout import (
+    dialog_parent,
+    hide_viewport_overlay,
+    reset_viewer_camera,
+    set_canvas_background,
+    set_status,
+    show_viewport_overlay,
+)
 from spektrafilm_gui.params_mapper import build_params_from_state
 from spektrafilm_gui.state_bridge import apply_gui_state, collect_gui_state
 from spektrafilm_gui.widgets import WidgetBundle
@@ -176,6 +184,7 @@ class GuiController:
             output_display_transform_key=OUTPUT_DISPLAY_TRANSFORM_KEY,
         )
         self._thread_pool = QThreadPool.globalInstance()
+        self._runtime_lock = threading.Lock()
         self._active_simulation_worker: runtime.SimulationWorker | None = None
         self._active_simulation_label: str | None = None
         self._runtime_simulator = None
@@ -206,6 +215,8 @@ class GuiController:
         self._history_record_timer.setSingleShot(True)
         self._history_record_timer.setInterval(350)
         self._history_record_timer.timeout.connect(self._record_debounced_history_state)
+        self._wb_picker_active = False
+        self._saved_cursor_style = 'standard'
         try:
             self._history_manager.reset(self._collect_current_gui_state())
         except Exception:
@@ -322,6 +333,8 @@ class GuiController:
         self._home_input_stack()
 
     def load_input_image(self, path: str) -> None:
+        if getattr(self, '_wb_picker_active', False):
+            self.toggle_wb_picker(False)
         if Path(path).suffix.lower() in RAW_EXTENSIONS:
             self.load_raw_image(path)
             return
@@ -356,7 +369,7 @@ class GuiController:
             sim_sig = compute_simulation_signature(gui_state, preview_max_size=preview_max_size, is_raw=False)
             cached_sim = self._gallery_cache.get_simulation(path, sim_sig)
             if cached_sim is not None:
-                self._on_simulation_finished(cached_sim)
+                self._display_cached_simulation(cached_sim)
             else:
                 self._sync_histogram(cached.preview_display_image)
                 self._request_auto_preview_if_enabled()
@@ -399,28 +412,39 @@ class GuiController:
                 self._switching_gallery_item = False
         self._request_auto_preview_if_enabled()
 
-    def load_raw_image(self, path: str) -> None:
+    def load_raw_image(self, path: str, *, status_title: str = "Loading RAW...") -> None:
+        if getattr(self, '_wb_picker_active', False):
+            self.toggle_wb_picker(False)
         orig_path = path
-        try:
-            from spektrafilm.utils.raw_file_processor import resolve_raw_path
-            resolved = resolve_raw_path(path)
-            path = str(resolved)
-        except Exception as exc:
-            logger.warning("Could not resolve raw path %s: %s", path, exc)
+        gui_state = self._collect_current_gui_state()
+        preview_max_size = int(gui_state.gui_only.display.settings.preview_max_size)
+        raw_sig = compute_input_signature(gui_state, is_raw=True)
+        cached = self._gallery_cache.get_input(path, raw_sig, preview_max_size)
 
-        if path != orig_path:
-            if self._gallery_model is not None:
-                self._gallery_model.replace_item_path(orig_path, path)
+        if cached is None:
+            try:
+                from spektrafilm.utils.raw_file_processor import resolve_raw_path
+                resolved = resolve_raw_path(path)
+                path = str(resolved)
+            except Exception as exc:
+                logger.warning("Could not resolve raw path %s: %s", path, exc)
+
+            if path != orig_path:
+                if self._gallery_model is not None:
+                    self._gallery_model.replace_item_path(orig_path, path)
+                cached = self._gallery_cache.get_input(path, raw_sig, preview_max_size)
 
         load_raw_section = getattr(self._widgets, 'load_raw', None)
         if load_raw_section is not None:
             set_path_fn = getattr(load_raw_section, 'set_path', None)
             if callable(set_path_fn):
-                set_path_fn(path)
-        gui_state = self._collect_current_gui_state()
-        preview_max_size = int(gui_state.gui_only.display.settings.preview_max_size)
-        raw_sig = compute_input_signature(gui_state, is_raw=True)
-        cached = self._gallery_cache.get_input(path, raw_sig, preview_max_size)
+                curr_text = getattr(getattr(load_raw_section, 'file_path', None), 'text', lambda: '')()
+                if curr_text != path:
+                    detected_wb = (gui_state.gui_only.load_raw.temperature, gui_state.gui_only.load_raw.tint) if cached is not None else None
+                    try:
+                        set_path_fn(path, detected_wb=detected_wb)
+                    except TypeError:
+                        set_path_fn(path)
         if cached is not None:
             self._current_input_path = path
             self._current_input_image = cached.full_image
@@ -453,6 +477,7 @@ class GuiController:
             sim_sig = compute_simulation_signature(gui_state, preview_max_size=preview_max_size, is_raw=True)
             cached_sim = self._gallery_cache.get_simulation(path, sim_sig)
             if cached_sim is not None:
+                cached_sim.input_path = path
                 self._on_simulation_finished(cached_sim)
             else:
                 self._sync_histogram(cached.preview_display_image)
@@ -460,6 +485,7 @@ class GuiController:
             return
 
         set_status(self._viewer, "Loading raw...", timeout_ms=0)
+        show_viewport_overlay(self._viewer, status_title, f"Demosaicing {Path(path).name}...")
         lens_info: dict[str, str] = {}
         try:
             image = load_and_process_raw_file(
@@ -468,6 +494,7 @@ class GuiController:
                 temperature=gui_state.gui_only.load_raw.temperature,
                 tint=gui_state.gui_only.load_raw.tint,
                 lens_correction=gui_state.gui_only.load_raw.lens_correction,
+                selected_lens=getattr(gui_state.gui_only.load_raw, "selected_lens", "Auto"),
                 chroma_denoise=gui_state.gui_only.load_raw.chroma_denoise,
                 chroma_denoise_strength=gui_state.gui_only.load_raw.chroma_denoise_strength,
                 raw_exposure_ev=getattr(gui_state.gui_only.load_raw, "raw_exposure_ev", 0.0),
@@ -478,6 +505,7 @@ class GuiController:
                 lens_info_out=lens_info,
             )
         except Exception as exc:
+            hide_viewport_overlay(self._viewer)
             logger.error("Failed to load RAW image %s: %s", path, exc, exc_info=True)
             QMessageBox.critical(dialog_parent(self._viewer), 'Load raw', f'Failed to load RAW image.\n\n{exc}')
             set_status(self._viewer, 'Load raw failed')
@@ -519,6 +547,10 @@ class GuiController:
                 self._switching_gallery_item = False
 
         lens_summary = lens_info.get('summary')
+        if load_raw_section is not None:
+            set_lens_fn = getattr(load_raw_section, 'set_detected_lens', None)
+            if callable(set_lens_fn):
+                set_lens_fn(lens_summary)
         if lens_summary:
             set_status(
                 self._viewer,
@@ -529,6 +561,7 @@ class GuiController:
         else:
             set_status(self._viewer, "Loaded raw")
         self._request_auto_preview_if_enabled()
+        hide_viewport_overlay(self._viewer)
 
     def is_current_image_raw(self) -> bool:
         if self._gallery_model is not None and self._gallery_model.current_item is not None and self._gallery_model.current_item.is_raw:
@@ -549,7 +582,11 @@ class GuiController:
             if load_raw_section is not None:
                 path = getattr(getattr(load_raw_section, 'file_path', None), 'text', lambda: '')().strip()
         if path and self.is_current_image_raw():
-            self.load_raw_image(path)
+            self._gallery_cache.invalidate_path(path)
+            try:
+                self.load_raw_image(path, status_title="Reprocessing RAW...")
+            except TypeError:
+                self.load_raw_image(path)
 
     def on_raw_setting_changed(self, *_args: Any) -> None:
         if self.is_current_image_raw():
@@ -558,6 +595,225 @@ class GuiController:
     def schedule_raw_setting_reprocess(self, *_args: Any) -> None:
         if self.is_current_image_raw():
             self._raw_reprocess_timer.start()
+
+    def run_auto_white_balance(self) -> None:
+        """Estimate neutral white balance and tint from unclipped image midtones and apply it."""
+        if not self.is_current_image_raw():
+            set_status(self._viewer, "No RAW image loaded for Auto White Balance")
+            return
+
+        sample_source = self._current_preview_image if self._current_preview_image is not None else self._current_input_image
+        if sample_source is None:
+            set_status(self._viewer, "No image data available for Auto White Balance")
+            return
+
+        from spektrafilm.utils.raw_file_processor import calculate_auto_wb
+
+        gui_state = self._collect_current_gui_state()
+        curr_wb_mode = getattr(gui_state.gui_only.load_raw, 'white_balance', 'as_shot')
+        current_temp = float(getattr(gui_state.gui_only.load_raw, 'temperature', 5500.0) or 5500.0)
+        current_tint = float(getattr(gui_state.gui_only.load_raw, 'tint', 1.0) or 1.0)
+        if curr_wb_mode == 'daylight':
+            current_temp, current_tint = 5500.0, 1.0
+        elif curr_wb_mode == 'tungsten':
+            current_temp, current_tint = 3200.0, 1.0
+
+        colorspace = getattr(getattr(gui_state.input_image, 'io', None), 'input_color_space', 'ACES2065-1')
+
+        try:
+            new_temp, new_tint = calculate_auto_wb(
+                sample_source,
+                current_temp=current_temp,
+                current_tint=current_tint,
+                colorspace=colorspace,
+            )
+        except Exception as exc:
+            logger.error("Auto WB calculation failed: %s", exc, exc_info=True)
+            set_status(self._viewer, f"Auto WB failed: {exc}")
+            return
+
+        load_raw_sec = getattr(self._widgets, 'load_raw', None)
+        if load_raw_sec is not None and hasattr(load_raw_sec, 'set_white_balance_custom'):
+            load_raw_sec.set_white_balance_custom(new_temp, new_tint)
+
+        self.record_history_state(immediate=True)
+        self.reprocess_current_raw()
+        set_status(self._viewer, f"Auto WB applied: {new_temp:.0f} K, tint {new_tint:.2f}")
+
+    def toggle_wb_picker(self, active: bool | None = None) -> None:
+        """Activate or deactivate the interactive white balance eyedropper tool."""
+        if active is None:
+            active = not getattr(self, '_wb_picker_active', False)
+
+        load_raw_sec = getattr(self._widgets, 'load_raw', None)
+
+        if active:
+            if not self.is_current_image_raw() or (self._current_input_image is None and self._current_preview_image is None):
+                set_status(self._viewer, "No RAW image loaded for white balance picker")
+                if load_raw_sec is not None and hasattr(load_raw_sec, 'cancel_wb_picker'):
+                    load_raw_sec.cancel_wb_picker()
+                return
+
+            self._wb_picker_active = True
+            cursor_obj = getattr(self._viewer, 'cursor', None)
+            if cursor_obj is not None:
+                self._saved_cursor_style = getattr(cursor_obj, 'style', 'standard')
+                try:
+                    cursor_obj.style = 'crosshair'
+                except Exception:
+                    pass
+
+            try:
+                qt_canvas = getattr(getattr(getattr(self._viewer, 'window', None), '_qt_viewer', None), 'canvas', None)
+                if qt_canvas and hasattr(qt_canvas, 'native'):
+                    from qtpy.QtCore import Qt
+                    qt_canvas.native.setCursor(Qt.CrossCursor)
+            except Exception:
+                pass
+
+            if hasattr(self._viewer, 'mouse_drag_callbacks'):
+                if self._on_wb_picker_mouse_drag not in self._viewer.mouse_drag_callbacks:
+                    self._viewer.mouse_drag_callbacks.append(self._on_wb_picker_mouse_drag)
+
+            try:
+                if hasattr(self._viewer, 'bind_key'):
+                    self._viewer.bind_key('Escape', self._on_wb_picker_escape, overwrite=True)
+            except Exception:
+                pass
+
+            set_status(self._viewer, "Click on a neutral grey or white surface to set White Balance (Esc to cancel)", timeout_ms=0)
+        else:
+            self._wb_picker_active = False
+            cursor_obj = getattr(self._viewer, 'cursor', None)
+            if cursor_obj is not None:
+                try:
+                    cursor_obj.style = getattr(self, '_saved_cursor_style', 'standard') or 'standard'
+                except Exception:
+                    pass
+
+            try:
+                qt_canvas = getattr(getattr(getattr(self._viewer, 'window', None), '_qt_viewer', None), 'canvas', None)
+                if qt_canvas and hasattr(qt_canvas, 'native'):
+                    qt_canvas.native.unsetCursor()
+            except Exception:
+                pass
+
+            if hasattr(self._viewer, 'mouse_drag_callbacks'):
+                if self._on_wb_picker_mouse_drag in self._viewer.mouse_drag_callbacks:
+                    self._viewer.mouse_drag_callbacks.remove(self._on_wb_picker_mouse_drag)
+
+            try:
+                if hasattr(self._viewer, 'bind_key'):
+                    self._viewer.bind_key('Escape', None)
+            except Exception:
+                pass
+
+            if load_raw_sec is not None and hasattr(load_raw_sec, 'cancel_wb_picker'):
+                load_raw_sec.cancel_wb_picker()
+
+    def _on_wb_picker_escape(self, viewer: Any = None) -> None:
+        if getattr(self, '_wb_picker_active', False):
+            self.toggle_wb_picker(False)
+            set_status(self._viewer, "White balance picker cancelled")
+
+    def _on_wb_picker_mouse_drag(self, viewer: Any, event: Any):
+        if not getattr(self, '_wb_picker_active', False):
+            return
+        btn = getattr(event, 'button', None)
+        if btn is not None and btn != 1:
+            return
+        pos = getattr(event, 'position', None)
+        if pos is not None:
+            self._handle_wb_picker_click(pos)
+        yield
+        while getattr(event, 'type', '') == 'mouse_move':
+            yield
+
+    def _handle_wb_picker_click(self, pos: tuple[float, float]) -> None:
+        target_layer = self._output_layer()
+        if target_layer is None or not getattr(target_layer, 'visible', True):
+            target_layer = self._layers.preview_input_layer()
+        if target_layer is None:
+            return
+
+        try:
+            data_coords = target_layer.world_to_data(pos)
+        except Exception:
+            return
+
+        layer_data = getattr(target_layer, 'data', None)
+        if layer_data is None or layer_data.ndim < 2:
+            return
+
+        layer_h, layer_w = layer_data.shape[:2]
+        norm_y = float(data_coords[0]) / max(float(layer_h), 1.0)
+        norm_x = float(data_coords[1]) / max(float(layer_w), 1.0)
+
+        if not (0.0 <= norm_y <= 1.0 and 0.0 <= norm_x <= 1.0):
+            set_status(self._viewer, "Clicked outside the image area; click on a neutral point inside the image")
+            return
+
+        sample_source = self._current_input_image if self._current_input_image is not None else self._current_preview_image
+        if sample_source is None:
+            return
+
+        src_h, src_w = sample_source.shape[:2]
+        pixel_y = int(round(norm_y * (src_h - 1)))
+        pixel_x = int(round(norm_x * (src_w - 1)))
+        pixel_y = max(0, min(src_h - 1, pixel_y))
+        pixel_x = max(0, min(src_w - 1, pixel_x))
+
+        patch_r = 3
+        y0 = max(0, pixel_y - patch_r)
+        y1 = min(src_h, pixel_y + patch_r + 1)
+        x0 = max(0, pixel_x - patch_r)
+        x1 = min(src_w, pixel_x + patch_r + 1)
+        patch = sample_source[y0:y1, x0:x1, :3]
+        med_val = np.median(patch.reshape(-1, 3), axis=0)
+
+        if float(np.max(med_val)) >= 0.99:
+            set_status(self._viewer, "Cannot set White Balance: clicked area is clipped (overexposed). Select a non-clipped neutral area.")
+            return
+        if float(np.max(med_val)) <= 0.005:
+            set_status(self._viewer, "Cannot set White Balance: clicked area is too dark (underexposed). Select a brighter neutral area.")
+            return
+
+        from spektrafilm.utils.raw_file_processor import calculate_spot_wb
+
+        gui_state = self._collect_current_gui_state()
+        curr_wb_mode = getattr(gui_state.gui_only.load_raw, 'white_balance', 'as_shot')
+        current_temp = float(getattr(gui_state.gui_only.load_raw, 'temperature', 5500.0) or 5500.0)
+        current_tint = float(getattr(gui_state.gui_only.load_raw, 'tint', 1.0) or 1.0)
+        if curr_wb_mode == 'daylight':
+            current_temp, current_tint = 5500.0, 1.0
+        elif curr_wb_mode == 'tungsten':
+            current_temp, current_tint = 3200.0, 1.0
+
+        colorspace = getattr(getattr(gui_state.input_image, 'io', None), 'input_color_space', 'ACES2065-1')
+
+        try:
+            new_temp, new_tint = calculate_spot_wb(
+                sample_source,
+                pixel_y,
+                pixel_x,
+                current_temp=current_temp,
+                current_tint=current_tint,
+                patch_radius=patch_r,
+                colorspace=colorspace,
+            )
+        except Exception as exc:
+            logger.error("Spot WB calculation failed: %s", exc, exc_info=True)
+            set_status(self._viewer, f"Spot WB calculation failed: {exc}")
+            return
+
+        load_raw_sec = getattr(self._widgets, 'load_raw', None)
+        if load_raw_sec is not None and hasattr(load_raw_sec, 'set_white_balance_custom'):
+            load_raw_sec.set_white_balance_custom(new_temp, new_tint)
+
+        self.toggle_wb_picker(False)
+        self.record_history_state(immediate=True)
+        self.reprocess_current_raw()
+        set_status(self._viewer, f"White balance set to {new_temp:.0f} K, tint {new_tint:.2f}")
 
     def refresh_preview_cache(self, *_args) -> None:
         if self._current_input_image is None:
@@ -865,6 +1121,21 @@ class GuiController:
             target_path = Path(item.path)
             photo_state = load_sidecar(target_path)
             if photo_state is not None:
+                if item.is_raw:
+                    load_raw_section = getattr(self._widgets, 'load_raw', None)
+                    if load_raw_section is not None:
+                        set_path_fn = getattr(load_raw_section, 'set_path', None)
+                        if callable(set_path_fn):
+                            try:
+                                set_path_fn(
+                                    str(target_path),
+                                    detected_wb=(
+                                        photo_state.gui_only.load_raw.temperature,
+                                        photo_state.gui_only.load_raw.tint,
+                                    ),
+                                )
+                            except TypeError:
+                                set_path_fn(str(target_path))
                 apply_gui_state(photo_state, widgets=self._widgets)
             else:
                 if item.is_raw:
@@ -890,6 +1161,34 @@ class GuiController:
         self._history_manager.reset(self._collect_current_gui_state())
         self._schedule_gallery_prefetch(current_idx)
 
+    def _simulate_preview_for_prefetch(self, preview_image: np.ndarray, state: GuiState) -> SimulationResult | None:
+        if not self._auto_preview_enabled():
+            return None
+        params = self._configure_simulation_params(
+            build_params_from_state(state),
+            source_layer_name=INPUT_PREVIEW_LAYER_NAME,
+        )
+        precision = getattr(getattr(params, "settings", None), "precision", "float32")
+        dtype = np.float32 if precision == "float32" else np.float64
+        image = np.asarray(preview_image, dtype=dtype)
+        with self._runtime_lock:
+            self._next_runtime_digest_applies_stock_specifics = True
+            scan = self._process_image_with_runtime(image, params)
+            self._next_runtime_digest_applies_stock_specifics = True
+        scan_display, display_status = self._prepare_output_display_image(
+            scan,
+            output_color_space=state.simulation.io.output_color_space,
+            use_display_transform=state.gui_only.display.use_display_transform,
+        )
+        return SimulationResult(
+            mode_label='Preview',
+            display_image=scan_display,
+            float_image=np.asarray(scan),
+            output_color_space=state.simulation.io.output_color_space,
+            use_display_transform=state.gui_only.display.use_display_transform,
+            status_message=display_status,
+        )
+
     def _schedule_gallery_prefetch(self, current_idx: int) -> None:
         if self._gallery_model is None or self._gallery_model.count <= 1:
             return
@@ -908,6 +1207,7 @@ class GuiController:
 
         gui_state = self._collect_current_gui_state()
         preview_max_size = int(gui_state.gui_only.display.settings.preview_max_size)
+        auto_preview = self._auto_preview_enabled()
         targets: list[tuple[str, bool, GuiState]] = []
 
         for idx in valid_indices:
@@ -915,19 +1215,26 @@ class GuiController:
             if item is None:
                 continue
             path_str = str(item.path)
+
             item_state = load_sidecar(path_str)
             if item_state is None:
-                item_state = gui_state
+                item_state = clone_gui_state(gui_state)
 
             sig = compute_input_signature(item_state, is_raw=item.is_raw)
-            if self._gallery_cache.get_input(path_str, sig, preview_max_size) is not None:
-                continue
+            has_input = self._gallery_cache.get_input(path_str, sig, preview_max_size) is not None
+            if has_input:
+                if not auto_preview or not item.is_raw:
+                    continue
+                sim_sig = compute_simulation_signature(item_state, preview_max_size=preview_max_size, is_raw=item.is_raw)
+                if self._gallery_cache.get_simulation(path_str, sim_sig) is not None:
+                    continue
 
             targets.append((path_str, item.is_raw, item_state))
 
         if not targets:
             return
 
+        has_any_raw = any(is_raw for _, is_raw, _ in targets)
         worker = GalleryPrefetchWorker(
             targets=targets,
             cache=self._gallery_cache,
@@ -938,6 +1245,7 @@ class GuiController:
             prepare_preview_fn=self._prepare_input_color_preview_image,
             generation=current_gen,
             get_current_generation_fn=lambda: self._prefetch_generation,
+            simulate_preview_fn=self._simulate_preview_for_prefetch if (auto_preview and has_any_raw) else None,
         )
         self._thread_pool.start(worker)
 
@@ -1019,12 +1327,19 @@ class GuiController:
         converted_count = 0
         last_dng_path = None
         current_idx = self._gallery_model.current_index
+        total_targets = len(target_indices)
+        show_viewport_overlay(self._viewer, "Converting to DNG-RAW...", f"Preparing {total_targets} photo(s)...")
 
-        for idx in target_indices:
+        for i, idx in enumerate(target_indices, 1):
             item = self._gallery_model.item_at(idx)
             if item is None:
                 continue
             orig_path = item.path
+            show_viewport_overlay(
+                self._viewer,
+                "Converting to DNG-RAW...",
+                f"Converting '{item.filename}' ({i}/{total_targets})...",
+            )
             try:
                 set_status(self._viewer, f"Converting '{item.filename}' to DNG-RAW...", timeout_ms=0)
                 QtWidgets.QApplication.processEvents()
@@ -1037,6 +1352,7 @@ class GuiController:
                 if idx == current_idx:
                     self.load_raw_image(str(dng_path))
             except Exception as exc:
+                hide_viewport_overlay(self._viewer)
                 logger.error("Failed to convert %s to DNG: %s", item.filename, exc)
                 QtWidgets.QMessageBox.critical(
                     dialog_parent(self._viewer),
@@ -1044,6 +1360,8 @@ class GuiController:
                     f"Failed to convert '{item.filename}' to DNG-RAW:\n\n{exc}",
                 )
                 break
+
+        hide_viewport_overlay(self._viewer)
 
         if converted_count > 0:
             if converted_count == 1 and last_dng_path is not None:
@@ -1065,9 +1383,14 @@ class GuiController:
     def load_gallery_folder(self, folder: str | Path) -> int:
         if self._gallery_model is None:
             return 0
-        count = self._gallery_model.load_folder(folder)
-        set_status(self._viewer, f"Loaded {count} photo(s) from {Path(folder).name}")
-        return count
+        folder_name = Path(folder).name
+        show_viewport_overlay(self._viewer, "Importing Photos...", f"Scanning {folder_name}...")
+        try:
+            count = self._gallery_model.load_folder(folder)
+            set_status(self._viewer, f"Loaded {count} photo(s) from {folder_name}")
+            return count
+        finally:
+            hide_viewport_overlay(self._viewer)
 
     def gallery_add_files(self) -> None:
         last_dir = load_dialog_dir('gallery_photos')
@@ -1084,9 +1407,15 @@ class GuiController:
     def add_gallery_files(self, paths: list[str | Path]) -> int:
         if self._gallery_model is None:
             return 0
-        count = self._gallery_model.add_files(paths)
-        set_status(self._viewer, f"Added {count} photo(s) to gallery")
-        return count
+        count_paths = len(paths)
+        detail = f"Adding {count_paths} photo(s)..." if count_paths > 1 else f"Adding {Path(paths[0]).name}..."
+        show_viewport_overlay(self._viewer, "Importing Photos...", detail)
+        try:
+            count = self._gallery_model.add_files(paths)
+            set_status(self._viewer, f"Added {count} photo(s) to gallery")
+            return count
+        finally:
+            hide_viewport_overlay(self._viewer)
 
     def gallery_copy_look(self) -> None:
         try:
@@ -1468,6 +1797,7 @@ class GuiController:
                     temperature=gui_state.gui_only.load_raw.temperature,
                     tint=gui_state.gui_only.load_raw.tint,
                     lens_correction=gui_state.gui_only.load_raw.lens_correction,
+                    selected_lens=getattr(gui_state.gui_only.load_raw, "selected_lens", "Auto"),
                     chroma_denoise=gui_state.gui_only.load_raw.chroma_denoise,
                     chroma_denoise_strength=gui_state.gui_only.load_raw.chroma_denoise_strength,
                     raw_exposure_ev=getattr(gui_state.gui_only.load_raw, "raw_exposure_ev", 0.0),
@@ -1674,11 +2004,12 @@ class GuiController:
         self.set_gray_18_canvas_enabled(bool(is_checked()) if callable(is_checked) else False)
 
     def _execute_simulation_request(self, request: SimulationRequest) -> SimulationResult:
-        return runtime.execute_simulation_request(
-            request,
-            run_simulation_fn=self._process_image_with_runtime,
-            prepare_output_display_image_fn=self._prepare_output_display_image,
-        )
+        with self._runtime_lock:
+            return runtime.execute_simulation_request(
+                request,
+                run_simulation_fn=self._process_image_with_runtime,
+                prepare_output_display_image_fn=self._prepare_output_display_image,
+            )
 
     @staticmethod
     def _configure_simulation_params(params, *, source_layer_name: str):
@@ -1707,12 +2038,14 @@ class GuiController:
         precision = getattr(getattr(params, "settings", None), "precision", "float32")
         dtype = np.float32 if precision == "float32" else np.float64
         image = np.asarray(image_data, dtype=dtype)
+        self._prefetch_generation += 1
         request = SimulationRequest(
             mode_label=mode_label,
             image=image,
             params=params,
             output_color_space=state.simulation.io.output_color_space,
             use_display_transform=state.gui_only.display.use_display_transform,
+            input_path=self._current_input_path,
         )
 
         worker = runtime.SimulationWorker(request, execute_request=self._execute_simulation_request)
@@ -1724,7 +2057,20 @@ class GuiController:
         self._set_simulation_controls_enabled(False)
         if report_status:
             set_status(self._viewer, f'Computing {mode_label.lower()}...', timeout_ms=0)
-        self._thread_pool.start(worker)
+        try:
+            self._thread_pool.start(worker, 1)
+        except TypeError:
+            self._thread_pool.start(worker)
+
+    def _display_cached_simulation(self, result: SimulationResult) -> None:
+        self._set_or_add_output_layer(
+            result.display_image,
+            float_image=result.float_image,
+            output_color_space=result.output_color_space,
+            output_cctf_encoding=True,
+            use_display_transform=result.use_display_transform,
+            animate=False,
+        )
 
     def _on_simulation_finished(self, result: SimulationResult) -> None:
         report_status = self._active_simulation_reports_status
@@ -1732,6 +2078,24 @@ class GuiController:
         self._active_simulation_label = None
         self._active_simulation_reports_status = True
         self._set_simulation_controls_enabled(True)
+
+        if (
+            result.input_path is not None
+            and self._current_input_path is not None
+            and os.path.normcase(result.input_path) != os.path.normcase(self._current_input_path)
+        ):
+            if result.mode_label == 'Preview':
+                try:
+                    gui_state = self._collect_current_gui_state()
+                    preview_max_size = int(gui_state.gui_only.display.settings.preview_max_size)
+                    is_raw = Path(result.input_path).suffix.lower() in RAW_EXTENSIONS
+                    sim_sig = compute_simulation_signature(gui_state, preview_max_size=preview_max_size, is_raw=is_raw)
+                    self._gallery_cache.put_simulation(result.input_path, sim_sig, result)
+                except Exception:
+                    pass
+            self._replay_pending_auto_preview()
+            return
+
         is_interactive_preview = (result.mode_label == 'Preview')
         self._set_or_add_output_layer(
             result.display_image,

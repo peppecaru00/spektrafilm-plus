@@ -56,7 +56,8 @@ def section_header_icon(title: str, size: int = HEADER_ICON_SIZE) -> QtGui.QIcon
         return QtGui.QIcon()
 
     try:
-        path = pyconify.svg_path(icon_name, color=ACCENT_COLOR_TEXT, width=size, height=size)
+        from spektrafilm_gui.theme import get_accent_color
+        path = pyconify.svg_path(icon_name, color=get_accent_color(), width=size, height=size)
     except (OSError, TypeError, ValueError):
         return QtGui.QIcon()
 
@@ -85,4 +86,4 @@ def get_app_icon() -> QtGui.QIcon:
             icon = QtGui.QIcon(str(cand))
             if not icon.isNull():
                 return icon
-    return QtGui.QIcon()
+    return QtGui.QIcon()

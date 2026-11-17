@@ -471,18 +471,23 @@ def _c_max_lookup(
     L: np.ndarray, h: np.ndarray,
     L_grid: np.ndarray, h_grid: np.ndarray, C_max_table: np.ndarray,
 ) -> np.ndarray:
-    """Bilinear lookup of C_max(L, h)."""
-    L = np.clip(L, L_grid[0], L_grid[-1])
-    h_step = h_grid[1] - h_grid[0]
-    h_idx = (h - h_grid[0]) / h_step
-    h_lo = np.floor(h_idx).astype(int) % len(h_grid)
+    """Bilinear lookup of C_max(L, h). Works on NumPy or CuPy inputs
+    (``C_max_table`` must live on the same device as ``L``/``h``)."""
+    from spektrafilm.cuda.device import get_array_module
+    xp = get_array_module(L)
+    # Python-float grid scalars keep float32 inputs float32 (np.float64 scalars would upcast).
+    L0, L1, h0 = float(L_grid[0]), float(L_grid[-1]), float(h_grid[0])
+    L = xp.clip(L, L0, L1)
+    h_step = float(h_grid[1] - h_grid[0])
+    h_idx = (h - h0) / h_step
+    h_lo = xp.floor(h_idx).astype(int) % len(h_grid)
     h_hi = (h_lo + 1) % len(h_grid)
-    h_frac = h_idx - np.floor(h_idx)
+    h_frac = h_idx - xp.floor(h_idx)
 
-    L_idx = (L - L_grid[0]) / (L_grid[-1] - L_grid[0]) * (len(L_grid) - 1)
-    L_lo = np.clip(np.floor(L_idx).astype(int), 0, len(L_grid) - 2)
+    L_idx = (L - L0) / (L1 - L0) * (len(L_grid) - 1)
+    L_lo = xp.clip(xp.floor(L_idx).astype(int), 0, len(L_grid) - 2)
     L_hi = L_lo + 1
-    L_frac = L_idx - L_lo
+    L_frac = L_idx - L_lo.astype(L_idx.dtype)
 
     v00 = C_max_table[L_lo, h_lo]
     v01 = C_max_table[L_lo, h_hi]

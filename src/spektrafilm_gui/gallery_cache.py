@@ -17,7 +17,7 @@ from qtpy.QtCore import QObject, QRunnable, Signal
 
 from spektrafilm_gui.controller_runtime import SimulationResult
 from spektrafilm_gui.persistence import gui_state_to_dict
-from spektrafilm_gui.state import GuiState
+from spektrafilm_gui.state import GuiState, clone_gui_state
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +26,22 @@ def compute_raw_signature(gui_state: GuiState) -> tuple:
     """Return a hashable signature of all parameters that affect RAW loading/demosaicing."""
     raw = gui_state.gui_only.load_raw
     io = gui_state.input_image.io
+    wb = raw.white_balance.value if hasattr(raw.white_balance, "value") else str(raw.white_balance)
+    hl_mode = getattr(raw, "highlight_mode", "reconstruct")
+    hl_mode = hl_mode.value if hasattr(hl_mode, "value") else str(hl_mode)
+    cs = io.input_color_space.value if hasattr(io.input_color_space, "value") else str(io.input_color_space)
     return (
-        str(raw.white_balance),
+        wb,
         round(float(raw.temperature), 2),
         round(float(raw.tint), 4),
         bool(raw.lens_correction),
+        str(getattr(raw, "selected_lens", "Auto")),
         bool(raw.chroma_denoise),
         round(float(raw.chroma_denoise_strength), 3),
         round(float(getattr(raw, "raw_exposure_ev", 0.0)), 2),
         round(float(getattr(raw, "highlight_recovery", 1.0)), 2),
-        str(getattr(raw, "highlight_mode", "reconstruct")),
-        str(io.input_color_space),
+        hl_mode,
+        cs,
         bool(io.input_cctf_decoding),
     )
 
@@ -44,8 +49,9 @@ def compute_raw_signature(gui_state: GuiState) -> tuple:
 def compute_io_signature(gui_state: GuiState) -> tuple:
     """Return a hashable signature of input image IO decoding parameters."""
     io = gui_state.input_image.io
+    cs = io.input_color_space.value if hasattr(io.input_color_space, "value") else str(io.input_color_space)
     return (
-        str(io.input_color_space),
+        cs,
         bool(io.input_cctf_decoding),
     )
 
@@ -122,7 +128,7 @@ class GalleryCache:
 
     @staticmethod
     def _canonical(path: str | Path) -> str:
-        return str(Path(path).resolve())
+        return os.path.normcase(str(Path(path).resolve()))
 
     @staticmethod
     def _get_mtime(canonical_path: str) -> float:
@@ -142,14 +148,15 @@ class GalleryCache:
                 cached_mtime, state = entry
                 if cached_mtime == mtime:
                     self._sidecar_cache.move_to_end(canonical)
-                    return state
+                    return clone_gui_state(state)
         return None
 
     def put_sidecar(self, path: str | Path, state: GuiState) -> None:
         canonical = self._canonical(path)
         mtime = self._get_mtime(canonical)
+        cloned = clone_gui_state(state)
         with self._lock:
-            self._sidecar_cache[canonical] = (mtime, state)
+            self._sidecar_cache[canonical] = (mtime, cloned)
             self._sidecar_cache.move_to_end(canonical)
             while len(self._sidecar_cache) > self._max_sidecars:
                 self._sidecar_cache.popitem(last=False)
@@ -179,7 +186,7 @@ class GalleryCache:
         return None
 
     def put_input(self, entry: CachedInputImage) -> None:
-        key = (entry.path, entry.mtime, entry.signature)
+        key = (self._canonical(entry.path), entry.mtime, entry.signature)
         with self._lock:
             self._input_cache[key] = entry
             self._input_cache.move_to_end(key)
@@ -281,10 +288,11 @@ class GalleryPrefetchWorker(QRunnable):
         preview_max_size: int,
         load_raw_fn: Callable[..., np.ndarray],
         load_rgb_fn: Callable[..., np.ndarray],
-        resize_fn: Callable[[np.ndarray, int], np.ndarray],
+        resize_fn: Callable[..., np.ndarray],
         prepare_preview_fn: Callable[..., np.ndarray],
         generation: int,
         get_current_generation_fn: Callable[[], int],
+        simulate_preview_fn: Callable[[np.ndarray, GuiState], SimulationResult | None] | None = None,
     ) -> None:
         super().__init__()
         self._targets = targets
@@ -296,6 +304,7 @@ class GalleryPrefetchWorker(QRunnable):
         self._prepare_preview_fn = prepare_preview_fn
         self._generation = generation
         self._get_current_generation_fn = get_current_generation_fn
+        self._simulate_preview_fn = simulate_preview_fn
         self.signals = PrefetchWorkerSignals()
 
     def run(self) -> None:
@@ -306,57 +315,103 @@ class GalleryPrefetchWorker(QRunnable):
                 return
 
             try:
-                canonical = str(Path(path_str).resolve())
+                canonical = GalleryCache._canonical(path_str)
                 mtime = os.path.getmtime(canonical)
             except OSError:
                 continue
 
+            if is_raw:
+                try:
+                    from spektrafilm.utils.raw_file_processor import resolve_raw_path
+                    resolved = str(resolve_raw_path(canonical))
+                    if resolved != canonical:
+                        canonical = GalleryCache._canonical(resolved)
+                        mtime = os.path.getmtime(canonical)
+                except Exception:
+                    pass
+
+                raw_cfg = state.gui_only.load_raw
+                wb_mode = raw_cfg.white_balance.value if hasattr(raw_cfg.white_balance, "value") else str(raw_cfg.white_balance)
+                if wb_mode == "as_shot":
+                    try:
+                        from spektrafilm.utils.raw_file_processor import read_raw_white_balance
+                        cam_wb = read_raw_white_balance(canonical)
+                        raw_cfg.temperature = float(cam_wb[0])
+                        raw_cfg.tint = float(cam_wb[1])
+                    except Exception as exc:
+                        logger.debug("Could not read as-shot WB for %s: %s", canonical, exc)
+
+                try:
+                    from spektrafilm_gui.gallery_sidecar import save_sidecar
+                    self._cache.put_sidecar(canonical, state)
+                    save_sidecar(canonical, state)
+                except Exception:
+                    pass
+
             input_sig = compute_input_signature(state, is_raw)
-            if self._cache.get_input(canonical, input_sig, self._preview_max_size) is not None:
-                continue
+            cached_entry = self._cache.get_input(canonical, input_sig, self._preview_max_size)
+            if cached_entry is None:
+                try:
+                    lens_info: dict[str, str] = {}
+                    if is_raw:
+                        raw_cfg = state.gui_only.load_raw
+                        io_cfg = state.input_image.io
+                        image = self._load_raw_fn(
+                            canonical,
+                            white_balance=raw_cfg.white_balance,
+                            temperature=raw_cfg.temperature,
+                            tint=raw_cfg.tint,
+                            lens_correction=raw_cfg.lens_correction,
+                            selected_lens=getattr(raw_cfg, "selected_lens", "Auto"),
+                            chroma_denoise=raw_cfg.chroma_denoise,
+                            chroma_denoise_strength=raw_cfg.chroma_denoise_strength,
+                            raw_exposure_ev=getattr(raw_cfg, "raw_exposure_ev", 0.0),
+                            highlight_recovery=getattr(raw_cfg, "highlight_recovery", 1.0),
+                            highlight_mode=getattr(raw_cfg, "highlight_mode", "reconstruct"),
+                            output_colorspace=io_cfg.input_color_space,
+                            output_cctf_encoding=io_cfg.input_cctf_decoding,
+                            lens_info_out=lens_info,
+                        )
+                    else:
+                        image = self._load_rgb_fn(canonical)[..., :3]
 
-            try:
-                lens_info: dict[str, str] = {}
-                if is_raw:
-                    raw_cfg = state.gui_only.load_raw
-                    io_cfg = state.input_image.io
-                    image = self._load_raw_fn(
-                        canonical,
-                        white_balance=raw_cfg.white_balance,
-                        temperature=raw_cfg.temperature,
-                        tint=raw_cfg.tint,
-                        lens_correction=raw_cfg.lens_correction,
-                        chroma_denoise=raw_cfg.chroma_denoise,
-                        chroma_denoise_strength=raw_cfg.chroma_denoise_strength,
-                        raw_exposure_ev=getattr(raw_cfg, "raw_exposure_ev", 0.0),
-                        highlight_recovery=getattr(raw_cfg, "highlight_recovery", 1.0),
-                        highlight_mode=getattr(raw_cfg, "highlight_mode", "reconstruct"),
-                        output_colorspace=io_cfg.input_color_space,
-                        output_cctf_encoding=io_cfg.input_cctf_decoding,
-                        lens_info_out=lens_info,
+                    preview_image = self._resize_fn(image, max_size=self._preview_max_size)
+                    preview_display = self._prepare_preview_fn(
+                        preview_image,
+                        input_color_space=state.input_image.io.input_color_space,
+                        apply_cctf_decoding=state.input_image.io.input_cctf_decoding,
                     )
-                else:
-                    image = self._load_rgb_fn(canonical)[..., :3]
 
-                preview_image = self._resize_fn(image, max_size=self._preview_max_size)
-                preview_display = self._prepare_preview_fn(
-                    preview_image,
-                    input_color_space=state.input_image.io.input_color_space,
-                    apply_cctf_decoding=state.input_image.io.input_cctf_decoding,
-                )
+                    cached_entry = CachedInputImage(
+                        path=canonical,
+                        mtime=mtime,
+                        signature=input_sig,
+                        full_image=image,
+                        lens_info=lens_info,
+                        preview_image=preview_image,
+                        preview_display_image=preview_display,
+                        preview_max_size=self._preview_max_size,
+                    )
+                    self._cache.put_input(cached_entry)
+                    self.signals.prefetched.emit(canonical)
+                    logger.debug("Successfully prefetched and cached %s", canonical)
+                except Exception as exc:
+                    logger.warning("Prefetch failed for %s: %s", path_str, exc, exc_info=True)
+                    continue
 
-                cached_entry = CachedInputImage(
-                    path=canonical,
-                    mtime=mtime,
-                    signature=input_sig,
-                    full_image=image,
-                    lens_info=lens_info,
-                    preview_image=preview_image,
-                    preview_display_image=preview_display,
+            if self._simulate_preview_fn is not None and cached_entry is not None:
+                if self._get_current_generation_fn() != self._generation:
+                    return
+                sim_sig = compute_simulation_signature(
+                    state,
                     preview_max_size=self._preview_max_size,
+                    is_raw=is_raw,
                 )
-                self._cache.put_input(cached_entry)
-                self.signals.prefetched.emit(canonical)
-                logger.debug("Successfully prefetched and cached %s", canonical)
-            except Exception as exc:
-                logger.debug("Prefetch failed for %s: %s", path_str, exc)
+                if self._cache.get_simulation(canonical, sim_sig) is None:
+                    try:
+                        sim_result = self._simulate_preview_fn(cached_entry.preview_image, state)
+                        if sim_result is not None:
+                            self._cache.put_simulation(canonical, sim_sig, sim_result)
+                            logger.debug("Successfully pre-rendered simulation preview for %s", canonical)
+                    except Exception as exc:
+                        logger.debug("Prefetch simulation preview skipped for %s: %s", canonical, exc)

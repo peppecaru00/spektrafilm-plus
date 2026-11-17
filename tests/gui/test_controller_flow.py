@@ -272,6 +272,7 @@ def test_load_raw_image_uses_pipeline_input_settings_and_builds_preview_stack(mo
         'temperature': 3200.0,
         'tint': 0.85,
         'lens_correction': False,
+        'selected_lens': 'Auto',
         'chroma_denoise': False,
         'chroma_denoise_strength': 1.0,
         'raw_exposure_ev': 0.0,
@@ -950,3 +951,91 @@ def test_on_simulation_finished_skips_completed_status_for_silent_preview(monkey
 
     assert 'status_calls' not in captured
     assert controller._active_simulation_reports_status is True
+
+
+
+def test_run_auto_white_balance(monkeypatch) -> None:
+    captured = {}
+    mock_load_raw = SimpleNamespace(
+        white_balance=SimpleNamespace(value='as_shot'),
+        temperature=SimpleNamespace(value=5500.0),
+        tint=SimpleNamespace(value=1.0),
+        set_white_balance_custom=lambda temp, tint: captured.setdefault('set_custom', (temp, tint)),
+    )
+    mock_widgets = SimpleNamespace(
+        load_raw=mock_load_raw,
+        simulation=SimpleNamespace(preview_button=None, scan_button=None, save_button=None),
+    )
+    controller = GuiController(viewer=object(), widgets=mock_widgets)
+    controller._current_input_path = 'test.arw'
+    # Warm image
+    img = np.full((100, 100, 3), 0.5, dtype=np.float32)
+    img[..., 0] = 0.7
+    img[..., 2] = 0.3
+    controller._current_preview_image = img
+
+    monkeypatch.setattr(controller, 'is_current_image_raw', lambda: True)
+    monkeypatch.setattr(controller, 'reprocess_current_raw', lambda: captured.setdefault('reprocess_called', True))
+    monkeypatch.setattr(controller_module, 'set_status', lambda *args, **kwargs: None)
+
+    controller.run_auto_white_balance()
+
+    assert 'set_custom' in captured
+    temp, tint = captured['set_custom']
+    assert temp < 5000.0
+    assert captured.get('reprocess_called') is True
+
+
+def test_toggle_wb_picker_lifecycle(monkeypatch) -> None:
+    captured = {}
+    mock_load_raw = SimpleNamespace(
+        cancel_wb_picker=lambda: captured.setdefault('cancelled', True),
+        set_white_balance_custom=lambda t, tint: captured.setdefault('applied', (t, tint)),
+        white_balance=SimpleNamespace(value='as_shot'),
+        temperature=SimpleNamespace(value=5500.0),
+        tint=SimpleNamespace(value=1.0),
+    )
+    viewer = SimpleNamespace(
+        cursor=SimpleNamespace(style='standard'),
+        mouse_drag_callbacks=[],
+        bind_key=lambda *args, **kwargs: None,
+    )
+    controller = GuiController(viewer=viewer, widgets=SimpleNamespace(load_raw=mock_load_raw))
+    controller._current_input_path = 'sample.arw'
+    img = np.full((50, 50, 3), 0.4, dtype=np.float32)
+    img[20:30, 20:30, 0] = 0.8 # warm patch at center
+    img[20:30, 20:30, 2] = 0.2
+    controller._current_input_image = img
+    controller._current_preview_image = img
+
+    monkeypatch.setattr(controller, 'is_current_image_raw', lambda: True)
+    monkeypatch.setattr(controller, 'reprocess_current_raw', lambda: captured.setdefault('reprocessed', True))
+    monkeypatch.setattr(controller_module, 'set_status', lambda *args, **kwargs: None)
+
+    # 1. Activate
+    controller.toggle_wb_picker(True)
+    assert controller._wb_picker_active is True
+    assert viewer.cursor.style == 'crosshair'
+    assert controller._on_wb_picker_mouse_drag in viewer.mouse_drag_callbacks
+
+    # 2. Deactivate via Escape
+    controller._on_wb_picker_escape()
+    assert controller._wb_picker_active is False
+    assert viewer.cursor.style == 'standard'
+    assert controller._on_wb_picker_mouse_drag not in viewer.mouse_drag_callbacks
+
+    # 3. Reactivate and click on center
+    controller.toggle_wb_picker(True)
+    layer = SimpleNamespace(
+        visible=True,
+        data=img,
+        world_to_data=lambda pos: (25.0, 25.0), # center
+    )
+    monkeypatch.setattr(controller, '_output_layer', lambda: layer)
+
+    controller._handle_wb_picker_click((0.0, 0.0))
+    assert 'applied' in captured
+    applied_temp, applied_tint = captured['applied']
+    assert applied_temp < 5000.0
+    assert controller._wb_picker_active is False
+    assert captured.get('reprocessed') is True

@@ -44,6 +44,15 @@ def test_signatures():
     state2.input_image.io.input_color_space = "sRGB"
     assert io_sig1 != compute_io_signature(state2)
 
+    # Enum vs string normalization
+    from spektrafilm_gui.options import RawHighlightMode, RawWhiteBalance, RGBColorSpaces
+    state_enum = clone_gui_state(state1)
+    state_enum.gui_only.load_raw.white_balance = RawWhiteBalance.as_shot
+    state_enum.gui_only.load_raw.highlight_mode = RawHighlightMode.reconstruct
+    state_enum.input_image.io.input_color_space = RGBColorSpaces.ProPhotoRGB
+    assert compute_raw_signature(state_enum) == sig1
+    assert compute_io_signature(state_enum) == io_sig1
+
     # Input signature helper
     assert compute_input_signature(state1, is_raw=True) == sig1
     assert compute_input_signature(state1, is_raw=False) == io_sig1
@@ -363,4 +372,144 @@ def test_controller_photo_removal_invalidates_cache(tmp_path: Path, monkeypatch)
     # Remove photo 1
     controller.gallery_remove_current_photo()
     assert controller._gallery_cache.get_input(str(p1), sig, 640) is None
+
+
+def test_controller_raw_prefetch_with_distinct_camera_wb(tmp_path: Path, monkeypatch):
+    raw1 = tmp_path / "scene_01.arw"
+    raw2 = tmp_path / "scene_02.arw"
+    raw1.touch()
+    raw2.touch()
+
+    # Mock distinct camera WB readings for the two photos
+    def mock_read_wb(path):
+        if "scene_01" in str(path):
+            return (5200.0, 1.02)
+        elif "scene_02" in str(path):
+            return (3800.0, 0.95)
+        return (5500.0, 1.0)
+
+    monkeypatch.setattr("spektrafilm.utils.raw_file_processor.read_raw_white_balance", mock_read_wb)
+    monkeypatch.setattr("spektrafilm_gui.widget_sections.read_raw_white_balance", mock_read_wb)
+
+    viewer = FakeViewer()
+    widgets = create_widget_bundle()
+    apply_gui_state(PROJECT_DEFAULT_GUI_STATE, widgets=widgets)
+    controller = initialize_controller(viewer=viewer, widgets=widgets)
+
+    status_messages = []
+    monkeypatch.setattr("spektrafilm_gui.controller.set_status", lambda v, msg, **k: status_messages.append(msg))
+
+    raw_decode_calls = []
+    def mock_raw_load(path, **kwargs):
+        raw_decode_calls.append((str(Path(path).name), kwargs.get("temperature"), kwargs.get("tint")))
+        lens_info_out = kwargs.get("lens_info_out")
+        if isinstance(lens_info_out, dict):
+            lens_info_out["summary"] = "24-70mm"
+        return np.full((16, 16, 3), 0.35, dtype=np.float32)
+
+    monkeypatch.setattr("spektrafilm_gui.controller.load_and_process_raw_file", mock_raw_load)
+
+    model = controller._gallery_model
+    assert model is not None
+    model.load_folder(tmp_path)
+    controller._thread_pool.waitForDone(3000)
+
+    assert model.count == 2
+    assert model.current_index == 0
+    # Both scene_01 (initial display) and scene_02 (background prefetch) were decoded
+    assert len(raw_decode_calls) == 2
+    decoded_files = [c[0] for c in raw_decode_calls]
+    assert "scene_01.arw" in decoded_files
+    assert "scene_02.arw" in decoded_files
+
+    # Check that scene_02 was prefetched with its detected camera WB (3800.0)
+    scene_02_call = [c for c in raw_decode_calls if c[0] == "scene_02.arw"][0]
+    assert scene_02_call[1] == pytest.approx(3800.0)
+
+    # Clear status messages before switching
+    status_messages.clear()
+
+    # NOW: Switch to scene_02 -> MUST BE AN INSTANT CACHE HIT!
+    model.next_photo()
+    controller._thread_pool.waitForDone(2000)
+    assert model.current_index == 1
+    # Crucial assertion: raw_decode_calls MUST STILL BE 2 (no synchronous re-decoding!)
+    assert len(raw_decode_calls) == 2
+    assert any("Loaded raw (cached)" in m for m in status_messages)
+
+    # Clear status messages before switching back
+    status_messages.clear()
+
+    # Switch back to scene_01 -> MUST BE A CACHE HIT as well!
+    model.previous_photo()
+    controller._thread_pool.waitForDone(2000)
+    assert model.current_index == 0
+    assert len(raw_decode_calls) == 2
+    assert any("Loaded raw (cached)" in m for m in status_messages)
+
+
+def test_controller_raw_prefetch_pre_renders_simulation_and_skips_main_thread_resolve(tmp_path: Path, monkeypatch):
+    raw1 = tmp_path / "photo_a.arw"
+    raw2 = tmp_path / "photo_b.arw"
+    raw1.touch()
+    raw2.touch()
+
+    resolve_calls: list[str] = []
+    def mock_resolve(path):
+        resolve_calls.append(Path(path).name)
+        return Path(path)
+
+    monkeypatch.setattr("spektrafilm.utils.raw_file_processor.resolve_raw_path", mock_resolve)
+    monkeypatch.setattr("spektrafilm.utils.raw_file_processor.read_raw_white_balance", lambda p: (5000.0, 1.0))
+    monkeypatch.setattr("spektrafilm_gui.widget_sections.read_raw_white_balance", lambda p: (5000.0, 1.0))
+
+    viewer = FakeViewer()
+    widgets = create_widget_bundle()
+    apply_gui_state(PROJECT_DEFAULT_GUI_STATE, widgets=widgets)
+    controller = initialize_controller(viewer=viewer, widgets=widgets)
+
+    monkeypatch.setattr(
+        "spektrafilm_gui.controller.load_and_process_raw_file",
+        lambda path, **k: np.full((12, 12, 3), 0.4, dtype=np.float32),
+    )
+
+    sim_calls: list[str] = []
+    def mock_sim_prefetch(preview_img, state):
+        sim_calls.append("prefetch_sim")
+        return SimulationResult(
+            mode_label="Preview",
+            display_image=np.full((12, 12, 3), 180, dtype=np.uint8),
+            float_image=np.full((12, 12, 3), 0.7, dtype=np.float32),
+            output_color_space="sRGB",
+            use_display_transform=False,
+            status_message="Prefetched OK",
+        )
+
+    monkeypatch.setattr(controller, "_simulate_preview_for_prefetch", mock_sim_prefetch)
+
+    model = controller._gallery_model
+    assert model is not None
+    model.load_folder(tmp_path)
+    controller._thread_pool.waitForDone(3000)
+
+    # Background prefetch must have pre-rendered the simulation preview for photo_b.arw!
+    assert "prefetch_sim" in sim_calls
+
+    resolve_calls.clear()
+    finished_results: list[SimulationResult] = []
+    orig_finished = controller._on_simulation_finished
+    def spy_finished(res):
+        finished_results.append(res)
+        orig_finished(res)
+    monkeypatch.setattr(controller, "_on_simulation_finished", spy_finished)
+
+    # Switch to photo_b.arw -> must hit BOTH input cache AND simulation cache immediately
+    # with ZERO calls to resolve_raw_path!
+    model.next_photo()
+    assert len(resolve_calls) == 0
+    assert len(finished_results) == 1
+    assert finished_results[0].status_message == "Prefetched OK"
+    controller._thread_pool.waitForDone(1000)
+
+
 

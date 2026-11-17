@@ -80,8 +80,17 @@ def _launch() -> None:
     except Exception:
         pass
 
+    splash = None
+    try:
+        from spektrafilm_gui.splash_screen import StartupSplashScreen
+        splash = StartupSplashScreen()
+        splash.show()
+        splash.set_progress("Starting SpektraFilm Plus...", 0.06, "Loading core spectral & CUDA modules...")
+    except Exception:
+        splash = None
+
     from spektrafilm_gui.app import main
-    main()
+    main(splash=splash)
 
 
 

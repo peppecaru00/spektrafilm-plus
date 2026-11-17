@@ -85,15 +85,11 @@ def run_topology(
             # Dead-tap pruning: immediately delete any tap no longer needed by future nodes
             remaining_nodes = topology[i + 1:]
             future_reads = set().union(*(n.reads for n in remaining_nodes))
-            pruned = False
+            # Dropped CuPy arrays return to the pool for reuse; CuPy flushes the pool
+            # itself on OOM, so no explicit free_memory() here (it cost ~0.1 s per stage).
             for k in list(state.keys()):
                 if k != collect and k not in future_reads:
                     del state[k]
-                    pruned = True
-            if pruned:
-                from spektrafilm.cuda.device import is_cuda_available, free_memory
-                if is_cuda_available():
-                    free_memory()
     raise RuntimeError(
         f"no node path reaches tap {collect!r} from {inject!r}"
     )

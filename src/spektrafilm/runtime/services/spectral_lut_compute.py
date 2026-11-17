@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Callable
 import numpy as np
@@ -29,6 +30,26 @@ def _key_snapshot(part):
     if isinstance(part, tuple):
         return tuple(_key_snapshot(p) for p in part)
     return part
+
+
+# Process-wide cache shared by all SpectralLUTService instances: simulate() builds
+# a new pipeline per call, so the per-instance memo alone never hits across renders.
+_SHARED_TC_LUTS: list[tuple[tuple, np.ndarray]] = []
+_SHARED_TC_LUTS_MAX = 4
+_SHARED_TC_LUTS_LOCK = threading.Lock()
+
+
+def _shared_tc_lut(key: tuple, compute: Callable[[], np.ndarray]) -> np.ndarray:
+    with _SHARED_TC_LUTS_LOCK:
+        for cached_key, lut in _SHARED_TC_LUTS:
+            if _key_equal(cached_key, key):
+                return lut
+    lut = compute()
+    lut.flags.writeable = False  # shared between pipelines: must never be mutated in place
+    with _SHARED_TC_LUTS_LOCK:
+        _SHARED_TC_LUTS.insert(0, (_key_snapshot(key), lut))
+        del _SHARED_TC_LUTS[_SHARED_TC_LUTS_MAX:]
+    return lut
 
 
 @dataclass
@@ -253,7 +274,7 @@ class SpectralLUTService:
             compute = lambda: compute_tc_lut(
                 method, sens, ref_illu, gamut_compress=self.input_gamut_compress)
 
-        result = self._tc_lut_memo(method).get(key, compute)
+        result = self._tc_lut_memo(method).get(key, lambda: _shared_tc_lut(key, compute))
         self.filming_tc_lut_memory = result
         self._film_sensitivity = sens
         self._cached_filming_adaptation = self._copy_hanatos2025_adaptation(self.hanatos2025_adaptation)

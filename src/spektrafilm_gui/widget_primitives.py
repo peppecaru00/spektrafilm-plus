@@ -8,8 +8,6 @@ QSize = getattr(QtCore, 'QSize')
 from spektrafilm_gui.theme_palette import (
     HEADER_DIVIDER_LINE,
     SIZE_FORM_SPACING,
-    SIZE_SECTION_FRAME_INDENT,
-    SIZE_SECTION_FRAME_MARGIN,
     SIZE_SECTION_STACK_SPACING,
 )
 from spektrafilm_gui.icons import HEADER_ICON_SIZE, section_header_icon
@@ -21,13 +19,34 @@ def normalize_ui_text(text: str) -> str:
 
 
 def platform_default_font() -> QtGui.QFont:
-    return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.GeneralFont)
+    font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.GeneralFont)
+    if font.pointSize() <= 0:
+        font.setPointSize(9)
+    return font
 
 
-class CollapsibleSection(QtWidgets.QWidget):
+class _SectionHeaderWidget(QtWidgets.QFrame):
+    clicked = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class CollapsibleSection(QtWidgets.QFrame):
     def __init__(self, title: str, content: QtWidgets.QWidget, *, expanded: bool = True):
         super().__init__()
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self._content = content
+        self.setObjectName("sectionCard")
+        self.setProperty("role", "sectionCard")
 
         self._toggle = QtWidgets.QToolButton()
         self._toggle.setProperty('role', 'sectionToggle')
@@ -59,36 +78,39 @@ class CollapsibleSection(QtWidgets.QWidget):
         self._header_line = HeaderDivider()
         self._header_line.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._header_line.setFixedHeight(max(self._toggle.sizeHint().height(), self._title_button.sizeHint().height()))
+        self._header_line.hide()
 
-        header = QtWidgets.QWidget()
-        header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(int(SIZE_FORM_SPACING.removesuffix('px')))
+        self._header = _SectionHeaderWidget()
+        self._header.setObjectName("sectionHeader")
+        self._header.setProperty("role", "sectionHeader")
+        self._header.setCursor(QtCore.Qt.PointingHandCursor)
+        self._header.clicked.connect(self._toggle.toggle)
+
+        header_layout = QtWidgets.QHBoxLayout(self._header)
+        header_layout.setContentsMargins(8, 6, 8, 6)
+        header_layout.setSpacing(6)
         header_layout.setAlignment(QtCore.Qt.AlignVCenter)
         header_layout.addWidget(self._toggle, 0, QtCore.Qt.AlignVCenter)
         header_layout.addWidget(self._icon_label, 0, QtCore.Qt.AlignVCenter)
         header_layout.addWidget(self._title_button, 0, QtCore.Qt.AlignVCenter)
-        header_layout.addWidget(self._header_line, 1, QtCore.Qt.AlignVCenter)
+        header_layout.addStretch(1)
 
         self._frame = QtWidgets.QFrame()
-        self._frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self._frame.setFrameShadow(QtWidgets.QFrame.Plain)
+        self._frame.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self._frame.setObjectName("sectionFrame")
+        self._frame.setProperty("role", "sectionFrame")
+        self._frame.setFrameShape(QtWidgets.QFrame.NoFrame)
         frame_layout = QtWidgets.QVBoxLayout(self._frame)
-        frame_layout.setContentsMargins(
-            SIZE_SECTION_FRAME_INDENT,
-            SIZE_SECTION_FRAME_MARGIN,
-            SIZE_SECTION_FRAME_MARGIN,
-            SIZE_SECTION_FRAME_MARGIN,
-        )
-        frame_layout.setSpacing(0)
+        frame_layout.setContentsMargins(10, 8, 10, 10)
+        frame_layout.setSpacing(int(SIZE_FORM_SPACING.removesuffix('px')))
         frame_layout.setAlignment(QtCore.Qt.AlignTop)
         frame_layout.addWidget(self._content)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(int(SIZE_SECTION_STACK_SPACING.removesuffix('px')))
+        layout.setSpacing(0)
         layout.setAlignment(QtCore.Qt.AlignTop)
-        layout.addWidget(header)
+        layout.addWidget(self._header)
         layout.addWidget(self._frame)
 
         self._set_expanded(expanded)
@@ -110,6 +132,12 @@ class CollapsibleSection(QtWidgets.QWidget):
     def _set_expanded(self, expanded: bool) -> None:
         self._toggle.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
         self._frame.setVisible(expanded)
+        self.setProperty('expanded', expanded)
+        self._header.setProperty('expanded', str(expanded).lower())
+        self._header.style().unpolish(self._header)
+        self._header.style().polish(self._header)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def has_header_icon(self) -> bool:
         pixmap = self._icon_label.pixmap()

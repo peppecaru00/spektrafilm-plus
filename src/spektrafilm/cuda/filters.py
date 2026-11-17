@@ -242,7 +242,7 @@ def cuda_gaussian_filter(image: Any, sigma: Any, truncate: float = 3.0) -> Any:
             d_b2 = cp.array([b2], dtype=target_dtype)
             d_b3 = cp.array([b3], dtype=target_dtype)
 
-            ch_in = d_image[:, :, c:c+1]
+            ch_in = cp.ascontiguousarray(d_image[:, :, c:c+1])
             ch_tmp = cp.empty_like(ch_in)
             ch_out = cp.empty_like(ch_in)
 
@@ -307,19 +307,22 @@ def cuda_fftconvolve_2d(image_2d: Any, kernel_2d: Any, mode: str = "same") -> An
 
 
 def cuda_apply_diffusion_filter_um(image: Any, diffusion_filter: Any, pixel_size_um: float) -> Any:
-    """Apply a diffusion-filter PSF to an RGB image directly on GPU."""
+    """Apply a diffusion-filter PSF to an RGB image directly on GPU with low VRAM footprint."""
     if not diffusion_filter.active:
         return image
     if diffusion_filter.strength <= 0 or diffusion_filter.spatial_scale <= 0:
         return image
 
     import cupy as cp
+    from cupyx.scipy.fft import next_fast_len
     from spektrafilm.model.diffusion import (
         _DIFFUSION_FILTER_SHAPES,
+        _resolve_family_cfg,
+        _expand_group,
+        _halo_channel_weights,
         _strength_to_scatter,
         _overrides_from_params,
         _bloom_max_lambda_um,
-        diffusion_filter_psf,
     )
 
     family = diffusion_filter.filter_family
@@ -337,34 +340,63 @@ def cuda_apply_diffusion_filter_um(image: Any, diffusion_filter: Any, pixel_size
     radius = int(np.ceil(max(8.0 * bloom_max_lambda_px, 5.0)))
     radius = min(radius, max(min(image.shape[:2]) // 2 - 1, 1))
 
-    psf_shape = (2 * radius + 1, 2 * radius + 1)
-    halo_warmth = float(getattr(diffusion_filter, "halo_warmth", 0.0))
-    psf_per_channel = diffusion_filter_psf(
-        psf_shape,
-        family=family,
-        spatial_scale=diffusion_filter.spatial_scale,
-        pixel_size_um=pixel_size_um,
-        halo_warmth=halo_warmth,
-        overrides=overrides,
-    )
+    kh = kw = 2 * radius + 1
+    cfg = _resolve_family_cfg(family, overrides)
+    effective_warmth = float(cfg.get("halo_warmth_base", 0.0)) + float(getattr(diffusion_filter, "halo_warmth", 0.0))
+    sc = max(float(diffusion_filter.spatial_scale), 1e-6) / pixel_size_um
+
+    core_l, core_w = _expand_group(cfg["core"], kind="core")
+    halo_l, halo_w = _expand_group(cfg["halo"], kind="halo")
+    bloom_l, bloom_w = _expand_group(cfg["bloom"], kind="bloom")
+    halo_per_ch = _halo_channel_weights(halo_w, effective_warmth)
 
     is_f64 = hasattr(image, "dtype") and (image.dtype == np.float64 or image.dtype == cp.float64)
     target_dtype = np.float64 if is_f64 else np.float32
 
     d_image = to_device(image, dtype=target_dtype)
-    padded = cp.pad(d_image, ((radius, radius), (radius, radius), (0, 0)), mode="reflect")
-    blurred = cp.empty_like(padded)
+    H, W = d_image.shape[:2]
+    pad_h, pad_w = H + 2 * radius, W + 2 * radius
+    fshape = (next_fast_len(pad_h + kh - 1, real=True), next_fast_len(pad_w + kw - 1, real=True))
+    start_y = (kh - 1) // 2 + radius
+    start_x = (kw - 1) // 2 + radius
 
-    import cupyx.scipy.signal as signal
-    for channel in range(d_image.shape[2]):
-        d_kernel = to_device(psf_per_channel[..., channel], dtype=target_dtype)
-        blurred[:, :, channel] = signal.fftconvolve(
-            padded[:, :, channel], d_kernel, mode="same",
-        )
-    del padded
-    blurred = blurred[radius:-radius, radius:-radius, :]
-    out = (1.0 - p_s) * d_image + p_s * blurred
-    del blurred
-    from spektrafilm.cuda.device import free_memory
-    free_memory()
+    # Generate radially symmetric grid on GPU for instant PSF synthesis
+    y_grid = cp.arange(kh, dtype=target_dtype)[:, None] - (kh // 2)
+    x_grid = cp.arange(kw, dtype=target_dtype)[None, :] - (kw // 2)
+    r_grid = cp.sqrt(x_grid * x_grid + y_grid * y_grid)
+    del x_grid, y_grid
+
+    base_psf = cp.zeros((kh, kw), dtype=target_dtype)
+    for wk, lk in zip(core_w, core_l * sc):
+        lk = max(float(lk), 1e-6)
+        base_psf += target_dtype(cfg["w_c"] * wk / (2.0 * np.pi * lk * lk)) * cp.exp(-r_grid / lk)
+    for wk, lk in zip(bloom_w, bloom_l * sc):
+        lk = max(float(lk), 1e-6)
+        base_psf += target_dtype(cfg["w_b"] * wk / (2.0 * np.pi * lk * lk)) * cp.exp(-r_grid / lk)
+
+    out = cp.empty_like(d_image)
+    for c in range(d_image.shape[2]):
+        psf_c = base_psf.copy()
+        for wk, lk in zip(halo_per_ch[c], halo_l * sc):
+            lk = max(float(lk), 1e-6)
+            psf_c += target_dtype(cfg["w_h"] * wk / (2.0 * np.pi * lk * lk)) * cp.exp(-r_grid / lk)
+        psf_c /= cp.sum(psf_c)
+
+        sp_k = cp.fft.rfftn(psf_c, fshape)
+        del psf_c
+
+        pad_c = cp.pad(d_image[:, :, c], ((radius, radius), (radius, radius)), mode="reflect")
+        sp_img = cp.fft.rfftn(pad_c, fshape)
+        del pad_c
+
+        sp_img *= sp_k
+        del sp_k
+
+        conv = cp.fft.irfftn(sp_img, fshape)
+        del sp_img
+
+        out[:, :, c] = (1.0 - p_s) * d_image[:, :, c] + p_s * conv[start_y : start_y + H, start_x : start_x + W]
+        del conv
+
+    del r_grid, base_psf
     return out
